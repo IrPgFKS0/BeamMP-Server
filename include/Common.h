@@ -74,7 +74,7 @@ public:
     static TConsole& Console() { return mConsole; }
     static std::string ServerVersionString();
     static const Version& ServerVersion() { return mVersion; }
-    static Version ClientMinimumVersion() { return Version { 2, 2, 0 }; }
+    static Version ClientMinimumVersion() { return Version { 2, 7, 0 }; }
     static std::string PPS() { return mPPS; }
     static void SetPPS(const std::string& NewPPS) { mPPS = NewPPS; }
 
@@ -129,7 +129,7 @@ private:
     static inline std::mutex mShutdownHandlersMutex {};
     static inline std::deque<TShutdownHandler> mShutdownHandlers {};
 
-    static inline Version mVersion { 3, 8, 5 };
+    static inline Version mVersion { 3, 9, 0 };
 };
 
 void SplitString(std::string const& str, const char delim, std::vector<std::string>& out);

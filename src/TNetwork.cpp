@@ -32,6 +32,8 @@
 #include <boost/asio/ip/address_v6.hpp>
 #include <boost/asio/ip/v6_only.hpp>
 #include <cstring>
+#include <openssl/err.h>
+#include <openssl/rand.h>
 #include <zlib.h>
 
 typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO> rcv_timeout_option;
@@ -146,23 +148,30 @@ void TNetwork::UDPServerMain() {
                 }
 
                 if (Client->GetID() == ID) {
-                    // not initialized yet
-                    if (Client->GetUDPAddr() == ip::udp::endpoint {} || !Client->IsUDPConnected()) {
-                        // same IP (just a sanity check)
-                        if (remote_client_ep.address() == Client->GetTCPSock().remote_endpoint().address()) {
-                            Client->SetUDPAddr(remote_client_ep);
-                            Client->SetIsUDPConnected(true);
-                            beammp_debugf("UDP connected for client {}", ID);
-                        } else {
-                            beammp_debugf("Denied initial UDP packet due to IP mismatch");
+                    if (Client->GetUDPAddr() == ip::udp::endpoint {} && !Client->IsUDPConnected() && !Client->GetMagic().empty()) {
+                        if (Data.size() != 66) {
+                            beammp_debugf("Invalid size for UDP value. IP: {} ID: {}", remote_client_ep.address().to_string(), ID);
                             return false;
                         }
+
+                        const std::vector Magic(Data.begin() + 2, Data.end());
+
+                        if (Magic != Client->GetMagic()) {
+                            beammp_debugf("Invalid value for UDP IP: {} ID: {}", remote_client_ep.address().to_string(), ID);
+                            return false;
+                        }
+
+                        Client->SetMagic({});
+                        Client->SetUDPAddr(remote_client_ep);
+                        Client->SetIsUDPConnected(true);
+                        return false;
                     }
+
                     if (Client->GetUDPAddr() == remote_client_ep) {
                         Data.erase(Data.begin(), Data.begin() + 2);
-                        mServer.GlobalParser(ClientPtr, std::move(Data), mPPSMonitor, *this);
+                        mServer.GlobalParser(ClientPtr, std::move(Data), mPPSMonitor, *this, true);
                     } else {
-                        beammp_debugf("Ignored UDP packet due to remote address mismatch");
+                        beammp_debugf("Ignored UDP packet for Client {} due to remote address mismatch. Source: {}, Client: {}", ID, remote_client_ep.address().to_string(), Client->GetUDPAddr().address().to_string());
                         return false;
                     }
                 }
@@ -660,7 +669,7 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
             Client->Disconnect("TCPRcv failed");
             break;
         }
-        mServer.GlobalParser(c, std::move(res), mPPSMonitor, *this);
+        mServer.GlobalParser(c, std::move(res), mPPSMonitor, *this, false);
     }
 
     if (QueueSync.joinable())
@@ -751,6 +760,18 @@ void TNetwork::OnConnect(const std::weak_ptr<TClient>& c) {
     SyncResources(*LockedClient);
     if (LockedClient->IsDisconnected())
         return;
+    std::vector<unsigned char> buf(64);
+    int ret = RAND_bytes(buf.data(), buf.size());
+    if (ret != 1) {
+        unsigned long error = ERR_get_error();
+        beammp_errorf("RAND_bytes failed with error code {}", error);
+        beammp_assert(ret != 1);
+        return;
+    }
+
+    LockedClient->SetMagic(buf);
+    buf.insert(buf.begin(), 'U');
+    (void)Respond(*LockedClient, buf, true);
     (void)Respond(*LockedClient, StringToVector("M" + Application::Settings.getAsString(Settings::Key::General_Map)), true); // Send the Map on connect
     beammp_info(LockedClient->GetName() + " : Connected");
     LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onPlayerJoining", "", LockedClient->GetID()));

@@ -24,6 +24,7 @@
 #include <queue>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "BoostAliases.h"
 #include "Common.h"
@@ -101,6 +102,8 @@ public:
     [[nodiscard]] TServer& Server() const;
     void UpdatePingTime();
     int SecondsSinceLastPing();
+    void SetMagic(std::vector<uint8_t> magic) { mMagic = std::move(magic); }
+    [[nodiscard]] const std::vector<uint8_t>& GetMagic() const { return mMagic; }
 
 private:
     void InsertVehicle(int ID, const std::string& Data);
@@ -125,6 +128,7 @@ private:
     std::string mDID;
     int mID = -1;
     std::chrono::time_point<std::chrono::high_resolution_clock> mLastPingTime = std::chrono::high_resolution_clock::now();
+    std::vector<uint8_t> mMagic;
 };
 
 std::optional<std::weak_ptr<TClient>> GetClient(class TServer& Server, int ID);

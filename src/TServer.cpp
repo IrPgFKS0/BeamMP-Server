@@ -161,7 +161,7 @@ size_t TServer::ClientCount() const {
     return mClients.size();
 }
 
-void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uint8_t>&& Packet, TPPSMonitor& PPSMonitor, TNetwork& Network) {
+void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uint8_t>&& Packet, TPPSMonitor& PPSMonitor, TNetwork& Network, bool udp) {
     constexpr std::string_view ABG = "ABG:";
     if (Packet.size() >= ABG.size() && std::equal(Packet.begin(), Packet.begin() + ABG.size(), ABG.begin(), ABG.end())) {
         Packet.erase(Packet.begin(), Packet.begin() + ABG.size());
@@ -213,6 +213,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
     }
     switch (Code) {
     case 'H': // initial connection
+        if (udp) {
+            beammp_debugf("Received 'H' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
         if (!Network.SyncClient(Client)) {
             // TODO handle
         }
@@ -226,12 +230,20 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         }
         return;
     case 'O':
+        if (udp) {
+            beammp_debugf("Received 'O' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
         if (Packet.size() > 1000) {
             beammp_debug(("Received data from: ") + LockedClient->GetName() + (" Size: ") + std::to_string(Packet.size()));
         }
         ParseVehicle(*LockedClient, StringPacket, Network);
         return;
     case 'C': {
+        if (udp) {
+            beammp_debugf("Received 'C' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
         if (Packet.size() < 4 || std::find(Packet.begin() + 3, Packet.end(), ':') == Packet.end())
             break;
         const auto PacketAsString = std::string(reinterpret_cast<const char*>(Packet.data()), Packet.size());
@@ -262,6 +274,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         return;
     }
     case 'E':
+        if (udp) {
+            beammp_debugf("Received 'E' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
+            return;
+        }
         HandleEvent(*LockedClient, StringPacket);
         return;
     case 'N':
@@ -304,6 +320,15 @@ void TServer::HandleEvent(TClient& c, const std::string& RawData) {
     }
     std::string Name = RawData.substr(2, NameDataSep - 2);
     std::string Data = RawData.substr(NameDataSep + 1);
+
+    std::vector<std::string> exclude = {"onInit", "onFileChanged","onVehicleDeleted","onConsoleInput","onPlayerAuth","postPlayerAuth", "onPlayerDisconnect",
+    "onPlayerConnecting","onPlayerJoining","onPlayerJoin","onChatMessage","postChatMessage","onVehicleSpawn","postVehicleSpawn","onVehicleEdited", "postVehicleEdited",
+    "onVehicleReset","onVehiclePaintChanged","onShutdown"};
+
+    if (std::ranges::find(exclude, Name) != exclude.end()) {
+        beammp_debugf("Excluded event triggered by client '{}' ({}): '{}', ignoring.", c.GetName(), c.GetID(), Name);
+        return;
+    }
     LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent(Name, "", c.GetID(), Data));
 }
 
