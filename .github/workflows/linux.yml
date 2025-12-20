@@ -20,8 +20,6 @@ jobs:
       matrix:
         include:
           - distro: debian
-            version: 11
-          - distro: debian
             version: 12
           - distro: ubuntu
             version: 22.04
@@ -48,6 +46,7 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: 'recursive'
+          fetch-depth: 0
 
       - name: Git config safe directory
         shell: bash
@@ -91,8 +90,6 @@ jobs:
       matrix:
         include:
           - distro: debian
-            version: 11
-          - distro: debian
             version: 12
           - distro: ubuntu
             version: 22.04
@@ -119,6 +116,7 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: 'recursive'
+          fetch-depth: 0
 
       - name: Git config safe directory
         shell: bash

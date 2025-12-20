@@ -148,7 +148,8 @@ if(UNIX)
 endif(UNIX)
 
 if (WIN32)
-    add_compile_options("-D_WIN32_WINNT=0x0601")
+    add_compile_definitions(_WIN32_WINNT=0x0A00)
+
     add_compile_options("/bigobj")
 endif(WIN32)
 
