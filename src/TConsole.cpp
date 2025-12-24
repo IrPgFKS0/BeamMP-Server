@@ -160,7 +160,7 @@ void TConsole::ChangeToRegularConsole() {
 }
 
 bool TConsole::EnsureArgsCount(const std::vector<std::string>& args, size_t n) {
-    if (n == 0 && args.size() != 0) {
+    if (n == 0 && !args.empty()) {
         Application::Console().WriteRaw("This command expects no arguments.");
         return false;
     } else if (args.size() != n) {
@@ -198,7 +198,7 @@ void TConsole::Command_Lua(const std::string&, const std::vector<std::string>& a
         } else {
             Application::Console().WriteRaw("Lua state '" + NewStateId + "' is not a known state. Didn't switch to Lua.");
         }
-    } else if (args.size() == 0) {
+    } else if (args.empty()) {
         ChangeToLuaConsole(mDefaultStateId);
     }
 }
@@ -423,7 +423,7 @@ void TConsole::Command_Settings(const std::string&, const std::vector<std::strin
         settings set <category> <setting> <value>   sets specified setting to value
         )";
 
-    if (args.size() == 0) {
+    if (args.empty()) {
         beammp_errorf("No arguments specified for command 'settings'!");
         Application::Console().WriteRaw("BeamMP-Server Console: " + std::string(sHelpString));
         return;
@@ -705,7 +705,7 @@ void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
             }
         }
     }
-    if (NonNilFutures.size() == 0) {
+    if (NonNilFutures.empty()) {
         if (!IgnoreNotACommand) {
             Application::Console().WriteRaw("Error: Unknown command: '" + cmd + "'. Type 'help' to see a list of valid commands.");
         }
