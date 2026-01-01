@@ -198,7 +198,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         int PID = -1;
         int VID = -1;
 
-        auto MaybePidVid = GetPidVid(StringPacket.substr(3).substr(0, StringPacket.substr(3).find(':', 1)));
+        auto pidVidPart = StringPacket.substr(3);
+        auto MaybePidVid = GetPidVid(pidVidPart.substr(0, pidVidPart.find(':')));
         if (MaybePidVid) {
             std::tie(PID, VID) = MaybePidVid.value();
         }
@@ -293,7 +294,8 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         int PID = -1;
         int VID = -1;
 
-        auto MaybePidVid = GetPidVid(StringPacket.substr(3).substr(0, StringPacket.substr(3).find(':', 1)));
+        auto pidVidPart = StringPacket.substr(3);
+        auto MaybePidVid = GetPidVid(pidVidPart.substr(0, pidVidPart.find(':')));
         if (MaybePidVid) {
             std::tie(PID, VID) = MaybePidVid.value();
         }

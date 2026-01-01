@@ -131,7 +131,7 @@ void TLuaEngine::operator()() {
                 }
             }
         }
-        if (mLuaStates.size() == 0) {
+        if (mLuaStates.empty()) {
             beammp_trace("No Lua states, event loop running extremely sparsely");
             Application::SleepSafeSeconds(10);
         } else {
