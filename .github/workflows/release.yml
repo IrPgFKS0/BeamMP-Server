@@ -3,7 +3,7 @@ on:
   push:
     # Sequence of patterns matched against refs/tags
     tags:
-    - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+      - "v*" # Push events to matching v*, i.e. v1.0, v20.15.10
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -14,8 +14,8 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     name: Create Release
-    outputs: 
-      upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Create Release
         id: create_release
@@ -49,7 +49,7 @@ jobs:
     steps:
       - name: get-cmake
         uses: lukka/get-cmake@v3.28.1
-            
+
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@v6
         with:
@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/checkout@v2
         with:
-          submodules: 'recursive'
+          submodules: "recursive"
           fetch-depth: 0
 
       - name: Git config safe directory
@@ -81,7 +81,7 @@ jobs:
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
 
       - name: Upload Release Asset
-        id: upload-release-asset 
+        id: upload-release-asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,7 +122,7 @@ jobs:
     steps:
       - name: get-cmake
         uses: lukka/get-cmake@v3.28.1
-            
+
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@v6
         with:
@@ -137,7 +137,7 @@ jobs:
 
       - uses: actions/checkout@v2
         with:
-          submodules: 'recursive'
+          submodules: "recursive"
           fetch-depth: 0
 
       - name: Git config safe directory
@@ -154,7 +154,7 @@ jobs:
         run: bash ./scripts/${{ matrix.distro }}-${{ matrix.version }}/3-build.sh
 
       - name: Upload Release Asset
-        id: upload-release-asset 
+        id: upload-release-asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -191,7 +191,7 @@ jobs:
 
       - uses: actions/checkout@v2
         with:
-          submodules: 'recursive'
+          submodules: "recursive"
           fetch-depth: 0
 
       - name: Create Build Environment
@@ -203,7 +203,7 @@ jobs:
         run: bash ./scripts/windows/2-build.sh
 
       - name: Upload Release Asset
-        id: upload-release-asset 
+        id: upload-release-asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
