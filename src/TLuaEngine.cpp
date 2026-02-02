@@ -857,7 +857,15 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
     MPTable.set_function("GetPositionRaw", [&](int PID, int VID) -> std::pair<sol::table, std::string> {
         return Lua_GetPositionRaw(PID, VID);
     });
-    MPTable.set_function("SendChatMessage", &LuaAPI::MP::SendChatMessage);
+    MPTable.set_function("SendChatMessage", [&](sol::variadic_args Args) {
+        if (Args.size() == 2) {
+            LuaAPI::MP::SendChatMessage(Args.get<int>(0), Args.get<std::string>(1));
+        } else if (Args.size() == 3) {
+            LuaAPI::MP::SendChatMessage(Args.get<int>(0), Args.get<std::string>(1), Args.get<bool>(2));
+        } else {
+            beammp_lua_error("SendChatMessage expects 2 or 3 arguments.");
+        }
+    });
     MPTable.set_function("SendNotification", [&](sol::variadic_args Args) {
         if (Args.size() == 2) {
             LuaAPI::MP::SendNotification(Args.get<int>(0), Args.get<std::string>(1), "", Args.get<std::string>(1));
