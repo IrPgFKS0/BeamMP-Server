@@ -22,6 +22,7 @@
 #include "CustomAssert.h"
 #include "Http.h"
 #include "LuaAPI.h"
+#include "Env.h"
 #include "Profiling.h"
 #include "TLuaPlugin.h"
 #include "sol/object.hpp"
@@ -733,6 +734,25 @@ static void AddToTable(sol::table& table, const std::string& left, const T& valu
     }
 }
 
+static bool mDisableMPSet = [] {
+    auto DisableMPSet = Env::Get(Env::Key::PROVIDER_DISABLE_MP_SET).value_or("false");
+    return DisableMPSet == "true" || DisableMPSet == "1";
+}();
+
+static auto GetSettingName = [](int id) -> const char* {
+    switch (id) {
+        case 0: return "Debug";
+        case 1: return "Private";
+        case 2: return "MaxCars";
+        case 3: return "MaxPlayers";
+        case 4: return "Map";
+        case 5: return "Name";
+        case 6: return "Description";
+        case 7: return "InformationPacket";
+        default: return "Unknown";
+    }
+};
+
 static void JsonDecodeRecursive(sol::state_view& StateView, sol::table& table, const std::string& left, const nlohmann::json& right) {
     switch (right.type()) {
     case nlohmann::detail::value_t::null:
@@ -925,7 +945,13 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
     MPTable.set_function("CancelEventTimer", [&](const std::string& EventName) {
         mEngine->CancelEventTimers(EventName, mStateId);
     });
-    MPTable.set_function("Set", &LuaAPI::MP::Set);
+    if (mDisableMPSet) {
+        MPTable.set_function("Set", [this](int ConfigID, sol::object NewValue) {
+            beammp_lua_errorf("A script ({}) tried to call MP.Set to change setting '{}' but this was blocked by your server provider.", mStateId, GetSettingName(ConfigID));
+        });
+    } else {
+        MPTable.set_function("Set", &LuaAPI::MP::Set);
+    }
     MPTable.set_function("Get", &LuaAPI::MP::Get);
 
     auto UtilTable = StateView.create_named_table("Util");
