@@ -28,6 +28,7 @@
 #include <any>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -53,7 +54,6 @@ static std::optional<std::pair<int, int>> GetPidVid(const std::string& str) {
     }
     return std::nullopt;
 }
-
 TEST_CASE("GetPidVid") {
     SUBCASE("Valid singledigit") {
         const auto MaybePidVid = GetPidVid("0-1");
@@ -120,7 +120,6 @@ TEST_CASE("GetPidVid") {
         CHECK(!MaybePidVid);
     }
 }
-
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
     beammp_info("BeamMP Server v" + Application::ServerVersionString());
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
@@ -472,7 +471,13 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
-            Data = Data.substr(Data.find('{'));
+            auto BracketPos = Data.find('{');
+            if (BracketPos == std::string::npos) {
+                beammp_debugf("Invalid 'Or' packet body from client {}", c.GetID());
+                return;
+            }
+
+            Data = Data.substr(BracketPos);
             LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onVehicleReset", "", c.GetID(), VID, Data));
             Network.SendToAll(&c, StringToVector(Packet), false, true);
         }
@@ -501,7 +506,14 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
-            Data = Data.substr(Data.find('['));
+            auto BracketPos = Data.find('[');
+            if (BracketPos == std::string::npos) {
+                beammp_debugf("Invalid 'Op' packet body from client {}", c.GetID());
+                return;
+            }
+
+            Data = Data.substr(BracketPos);
+
             LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onVehiclePaintChanged", "", c.GetID(), VID, Data));
             Network.SendToAll(&c, StringToVector(Packet), false, true);
 

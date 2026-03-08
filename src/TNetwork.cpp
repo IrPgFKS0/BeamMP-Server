@@ -670,7 +670,13 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
             Client->Disconnect("TCPRcv failed");
             break;
         }
-        mServer.GlobalParser(c, std::move(res), mPPSMonitor, *this, false);
+        try {
+            mServer.GlobalParser(c, std::move(res), mPPSMonitor, *this, false);
+        } catch (const std::exception& e) {
+            beammp_warnf("Failed to receive/parse packet via TCP from client {}: {}", Client->GetID(), e.what());
+            Client->Disconnect("Failed to parse packet");
+            break;
+        }
     }
 
     if (QueueSync.joinable())
