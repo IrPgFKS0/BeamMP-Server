@@ -28,6 +28,7 @@
 #include <any>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -52,6 +53,15 @@ static std::optional<std::pair<int, int>> GetPidVid(const std::string& str) {
         }
     }
     return std::nullopt;
+}
+
+static std::optional<std::string> ExtractStructuredPayload(const std::string& PacketData, char BeginMarker) {
+    auto FoundPos = PacketData.find(BeginMarker);
+    if (FoundPos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    return PacketData.substr(FoundPos);
 }
 
 TEST_CASE("GetPidVid") {
@@ -119,6 +129,13 @@ TEST_CASE("GetPidVid") {
         const auto MaybePidVid = GetPidVid("0-x");
         CHECK(!MaybePidVid);
     }
+}
+
+TEST_CASE("ExtractStructuredPayload") {
+    CHECK_EQ(ExtractStructuredPayload("1-2:{\"reset\":true}", '{').value(), "{\"reset\":true}");
+    CHECK_EQ(ExtractStructuredPayload("1-2:[0,1,2,3]", '[').value(), "[0,1,2,3]");
+    CHECK_FALSE(ExtractStructuredPayload("1-2:null", '{').has_value());
+    CHECK_FALSE(ExtractStructuredPayload("1-2:null", '[').has_value());
 }
 
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
@@ -472,7 +489,13 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
-            Data = Data.substr(Data.find('{'));
+            auto ResetData = ExtractStructuredPayload(Data, '{');
+            if (!ResetData.has_value()) {
+                beammp_warnf("Malformed 'Or' packet from client {}: missing '{{' in '{}'", c.GetID(), Packet);
+                return;
+            }
+
+            Data = std::move(ResetData.value());
             LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onVehicleReset", "", c.GetID(), VID, Data));
             Network.SendToAll(&c, StringToVector(Packet), false, true);
         }
@@ -501,7 +524,13 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
-            Data = Data.substr(Data.find('['));
+            auto PaintData = ExtractStructuredPayload(Data, '[');
+            if (!PaintData.has_value()) {
+                beammp_warnf("Malformed 'Op' packet from client {}: missing '[' in '{}'", c.GetID(), Packet);
+                return;
+            }
+
+            Data = std::move(PaintData.value());
             LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onVehiclePaintChanged", "", c.GetID(), VID, Data));
             Network.SendToAll(&c, StringToVector(Packet), false, true);
 
