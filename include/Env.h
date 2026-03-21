@@ -26,6 +26,7 @@ enum class Key {
     // provider settings
     PROVIDER_UPDATE_MESSAGE,
     PROVIDER_DISABLE_CONFIG,
+    PROVIDER_DISABLE_MP_SET,
     PROVIDER_PORT_ENV,
     PROVIDER_IP_ENV
 };
