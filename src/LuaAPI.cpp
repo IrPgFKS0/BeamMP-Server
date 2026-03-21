@@ -178,11 +178,13 @@ std::pair<bool, std::string> LuaAPI::MP::DropPlayer(int ID, std::optional<std::s
     return { true, "" };
 }
 
-std::pair<bool, std::string> LuaAPI::MP::SendChatMessage(int ID, const std::string& Message) {
+std::pair<bool, std::string> LuaAPI::MP::SendChatMessage(int ID, const std::string& Message, const bool& LogChat) {
     std::pair<bool, std::string> Result;
     std::string Packet = "C:Server: " + Message;
     if (ID == -1) {
-        LogChatMessage("<Server> (to everyone) ", -1, Message);
+        if (LogChat) {
+            LogChatMessage("<Server> (to everyone) ", -1, Message);
+        }
         Engine->Network().SendToAll(nullptr, StringToVector(Packet), true, true);
         Result.first = true;
     } else {
@@ -194,7 +196,9 @@ std::pair<bool, std::string> LuaAPI::MP::SendChatMessage(int ID, const std::stri
                 Result.second = "Player still syncing data";
                 return Result;
             }
-            LogChatMessage("<Server> (to \"" + c->GetName() + "\")", -1, Message);
+            if (LogChat) {
+                LogChatMessage("<Server> (to \"" + c->GetName() + "\")", -1, Message);
+            }
             if (!Engine->Network().Respond(*c, StringToVector(Packet), true)) {
                 beammp_errorf("Failed to send chat message back to sender (id {}) - did the sender disconnect?", ID);
                 // TODO: should we return an error here?
