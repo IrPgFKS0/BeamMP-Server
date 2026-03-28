@@ -241,12 +241,14 @@ void TNetwork::TCPServerMain() {
             }
             ip::tcp::endpoint ClientEp;
             ip::tcp::socket ClientSocket = Acceptor.accept(ClientEp, ec);
-            if (ec) {
+            if (!ec) {
+                TConnection Conn { std::move(ClientSocket), ClientEp };
+                std::thread ID(&TNetwork::Identify, this, std::move(Conn));
+                ID.detach(); // TODO: Add to a queue and attempt to join periodically
+            }
+            else {
                 beammp_errorf("Failed to accept() new client: {}", ec.message());
             }
-            TConnection Conn { std::move(ClientSocket), ClientEp };
-            std::thread ID(&TNetwork::Identify, this, std::move(Conn));
-            ID.detach(); // TODO: Add to a queue and attempt to join periodically
         } catch (const std::exception& e) {
             beammp_errorf("Exception in accept routine: {}", e.what());
         }
