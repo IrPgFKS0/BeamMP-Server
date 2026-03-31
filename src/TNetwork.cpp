@@ -40,6 +40,7 @@ typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO> rcv
 
 static constexpr uint8_t MAX_CONCURRENT_CONNECTIONS = 10;
 static constexpr uint8_t MAX_GLOBAL_CONNECTIONS = 128;
+static constexpr uint8_t READ_TIMEOUT_S = 10; //seconds
 
 std::vector<uint8_t> StringToVector(const std::string& Str) {
     return std::vector<uint8_t>(Str.data(), Str.data() + Str.size());
@@ -279,11 +280,22 @@ void TNetwork::Identify(TConnection&& RawConnection) {
     RegisterThreadAuto();
     char Code;
 
-    boost::system::error_code ec;
-    ReadWithTimeout(RawConnection, &Code, 1, std::chrono::seconds(10));
+    boost::system::error_code ec = ReadWithTimeout(RawConnection, &Code, 1, std::chrono::seconds(READ_TIMEOUT_S));
     if (ec) {
         // TODO: is this right?!
+        beammp_debug("Error occured reading code");
         RawConnection.Socket.shutdown(socket_base::shutdown_both, ec);
+        mClientMapMutex.lock();
+        {
+            std::string ClientIP = RawConnection.SockAddr.address().to_string();
+            if (mClientMap[ClientIP] > 0) {
+                mClientMap[ClientIP]--;
+            }
+            if (mClientMap[ClientIP] == 0) {
+                mClientMap.erase(ClientIP);
+            }
+        }
+        mClientMapMutex.unlock();
         return;
     }
     std::shared_ptr<TClient> Client { nullptr };
@@ -314,6 +326,17 @@ void TNetwork::Identify(TConnection&& RawConnection) {
         beammp_errorf("Error during handling of code {} - client left in invalid state, closing socket: {}", Code, e.what());
         boost::system::error_code ec;
         RawConnection.Socket.shutdown(boost::asio::socket_base::shutdown_both, ec);
+        mClientMapMutex.lock();
+        {
+            std::string ClientIP = RawConnection.SockAddr.address().to_string();
+            if (mClientMap[ClientIP] > 0) {
+                mClientMap[ClientIP]--;
+            }
+            if (mClientMap[ClientIP] == 0) {
+                mClientMap.erase(ClientIP);
+            }
+        }
+        mClientMapMutex.unlock();
         if (ec) {
             beammp_debugf("Failed to shutdown client socket: {}", ec.message());
         }
