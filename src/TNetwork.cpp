@@ -661,15 +661,19 @@ void TNetwork::DisconnectClient(const std::weak_ptr<TClient> &c, const std::stri
 void TNetwork::DisconnectClient(TClient &c, const std::string &R)
 {
     if (c.IsDisconnected()) return;
-    std::string ClientIP = c.GetTCPSock().remote_endpoint().address().to_string();
-    mClientMapMutex.lock();
-    if (mClientMap[ClientIP] > 0) {
-        mClientMap[ClientIP]--;
+    try {
+        std::string ClientIP = c.GetTCPSock().remote_endpoint().address().to_string();
+        mClientMapMutex.lock();
+        if (mClientMap[ClientIP] > 0) {
+            mClientMap[ClientIP]--;
+        }
+        if (mClientMap[ClientIP] == 0) {
+            mClientMap.erase(ClientIP);
+        }
+        mClientMapMutex.unlock();
+    } catch (const std::exception& e) {
+        beammp_debugf("Failed to disconnect client (already disconnected?). There might be a lingering client in the IP-to-client map. This is not an error.");
     }
-    if (mClientMap[ClientIP] == 0) {
-        mClientMap.erase(ClientIP);
-    }
-    mClientMapMutex.unlock();
     c.Disconnect(R);
 }
 
