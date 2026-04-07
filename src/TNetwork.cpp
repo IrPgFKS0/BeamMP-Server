@@ -718,7 +718,7 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
     OnConnect(c);
     RegisterThread("(" + std::to_string(c.lock()->GetID()) + ") \"" + c.lock()->GetName() + "\"");
 
-    std::thread QueueSync(&TNetwork::Looper, this, c);
+    std::jthread QueueSync(&TNetwork::Looper, this, c);
 
     while (true) {
         if (c.expired())
@@ -743,9 +743,6 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
             break;
         }
     }
-
-    if (QueueSync.joinable())
-        QueueSync.join();
 
     if (!c.expired()) {
         auto Client = c.lock();
