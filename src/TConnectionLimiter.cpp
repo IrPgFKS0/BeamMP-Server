@@ -45,6 +45,8 @@ TConnectionLimiter::TGuard& TConnectionLimiter::TGuard::operator=(TGuard&& other
         mOwner = other.mOwner;
         mIp = std::move(other.mIp);
         other.mOwner = nullptr;
+        // setting this so its obvious when this happens, instead of being UB or empty string
+        other.mIp = "<moved-from>";
     }
     return *this;
 }
