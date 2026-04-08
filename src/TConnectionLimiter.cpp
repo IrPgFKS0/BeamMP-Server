@@ -35,7 +35,7 @@ std::optional<TConnectionLimiter::TGuard> TConnectionLimiter::TryAcquire(const s
 TConnectionLimiter::TGuard::TGuard(TConnectionLimiter* owner, std::string ip)
     : mOwner(owner)
     , mIp(std::move(ip)) {
-    beammp_debugf("Acquired connection guard for {}", ip);
+    beammp_debugf("Acquired connection guard for {}", mIp);
 }
 
 TConnectionLimiter::TGuard& TConnectionLimiter::TGuard::operator=(TGuard&& other) noexcept {
