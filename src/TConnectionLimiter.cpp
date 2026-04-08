@@ -70,12 +70,9 @@ TConnectionLimiter::TGuard& TConnectionLimiter::TGuard::operator=(TGuard&& other
 }
 
 void TConnectionLimiter::TGuard::Release() {
-    beammp_debugf("Trying to release connection guard for {} ...", mIp);
     if (mOwner) {
         mOwner->Release(mIp);
         mOwner = nullptr;
-        beammp_debugf("... Released connection guard for {}", mIp);
-    } else {
-        beammp_debugf("... Connection guard for {} was already released (nothing happened)", mIp);
+        beammp_debugf("Released connection guard for {}", mIp);
     }
 }
