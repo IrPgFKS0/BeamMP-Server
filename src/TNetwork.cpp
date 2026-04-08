@@ -20,6 +20,7 @@
 #include "Client.h"
 #include "Common.h"
 #include "LuaAPI.h"
+#include "TConnectionLimiter.h"
 #include "THeartbeatThread.h"
 #include "TLuaEngine.h"
 #include "TScopedTimer.h"
@@ -59,7 +60,8 @@ TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& R
     : mServer(Server)
     , mPPSMonitor(PPSMonitor)
     , mUDPSock(Server.IoCtx())
-    , mResourceManager(ResourceManager) {
+    , mResourceManager(ResourceManager)
+    , mConnectionLimiter(MAX_CONCURRENT_CONNECTIONS, MAX_GLOBAL_CONNECTIONS){
     Application::SetSubsystemStatus("TCPNetwork", Application::Status::Starting);
     Application::SetSubsystemStatus("UDPNetwork", Application::Status::Starting);
     Application::RegisterShutdownHandler([&] {
@@ -247,22 +249,17 @@ void TNetwork::TCPServerMain() {
             boost::asio::ip::tcp::socket ClientSocket = Acceptor.accept(ClientEp, ec);
             std::string ClientIP = ClientEp.address().to_string();
             if (!ec) {
-                mClientMapMutex.lock();
-                if (mClientMap[ClientIP] >= MAX_CONCURRENT_CONNECTIONS) {
-                    beammp_debugf("The connection was rejected for {}, as it had {} concurrent connections.", ClientIP, mClientMap[ClientIP]);
-                }
-                else if (mClientMap.size() >= MAX_GLOBAL_CONNECTIONS) {
-                    beammp_debugf("The connection was rejected for {}, as there are {} global connections.", ClientIP, mClientMap.size());
-                }
-                else {
+                auto MaybeGuard = mConnectionLimiter.TryAcquire(ClientEp.address().to_v6().to_string());
+                if (MaybeGuard.has_value()) {
+                    // move-swap to avoid copy ctor (deleted)
+                    auto Guard = std::move(MaybeGuard.value());
                     TConnection Conn { std::move(ClientSocket), ClientEp };
-                    std::thread ID(&TNetwork::Identify, this, std::move(Conn));
+                    std::thread ID(&TNetwork::Identify, this, std::move(Conn), std::move(Guard));
                     ID.detach(); // TODO: Add to a queue and attempt to join periodically
-                    mClientMap[ClientIP]++;
+                } else {
+                    beammp_errorf("Connection rejected for {} due to the global or concurrent connection limit", ClientIP);
                 }
-                mClientMapMutex.unlock();
-            }
-            else {
+            } else {
                 beammp_errorf("Failed to accept() new client: {}", ec.message());
             }
         } catch (const std::exception& e) {
@@ -276,7 +273,7 @@ void TNetwork::TCPServerMain() {
 #include "Json.h"
 namespace json = rapidjson;
 
-void TNetwork::Identify(TConnection&& RawConnection) {
+void TNetwork::Identify(TConnection&& RawConnection, TConnectionLimiter::TGuard&& Guard) {
     RegisterThreadAuto();
     char Code;
 
@@ -285,17 +282,8 @@ void TNetwork::Identify(TConnection&& RawConnection) {
         // TODO: is this right?!
         beammp_debug("Error occured reading code");
         RawConnection.Socket.shutdown(socket_base::shutdown_both, ec);
-        mClientMapMutex.lock();
-        {
-            std::string ClientIP = RawConnection.SockAddr.address().to_string();
-            if (mClientMap[ClientIP] > 0) {
-                mClientMap[ClientIP]--;
-            }
-            if (mClientMap[ClientIP] == 0) {
-                mClientMap.erase(ClientIP);
-            }
-        }
-        mClientMapMutex.unlock();
+        // TODO: is this right too?
+        RawConnection.Socket.close(ec);
         return;
     }
     std::shared_ptr<TClient> Client { nullptr };
@@ -326,17 +314,6 @@ void TNetwork::Identify(TConnection&& RawConnection) {
         beammp_errorf("Error during handling of code {} - client left in invalid state, closing socket: {}", Code, e.what());
         boost::system::error_code ec;
         RawConnection.Socket.shutdown(boost::asio::socket_base::shutdown_both, ec);
-        mClientMapMutex.lock();
-        {
-            std::string ClientIP = RawConnection.SockAddr.address().to_string();
-            if (mClientMap[ClientIP] > 0) {
-                mClientMap[ClientIP]--;
-            }
-            if (mClientMap[ClientIP] == 0) {
-                mClientMap.erase(ClientIP);
-            }
-        }
-        mClientMapMutex.unlock();
         if (ec) {
             beammp_debugf("Failed to shutdown client socket: {}", ec.message());
         }
@@ -661,19 +638,6 @@ void TNetwork::DisconnectClient(const std::weak_ptr<TClient> &c, const std::stri
 void TNetwork::DisconnectClient(TClient &c, const std::string &R)
 {
     if (c.IsDisconnected()) return;
-    try {
-        std::string ClientIP = c.GetTCPSock().remote_endpoint().address().to_string();
-        mClientMapMutex.lock();
-        if (mClientMap[ClientIP] > 0) {
-            mClientMap[ClientIP]--;
-        }
-        if (mClientMap[ClientIP] == 0) {
-            mClientMap.erase(ClientIP);
-        }
-        mClientMapMutex.unlock();
-    } catch (const std::exception& e) {
-        beammp_debugf("Failed to disconnect client (already disconnected?). There might be a lingering client in the IP-to-client map. This is not an error.");
-    }
     c.Disconnect(R);
 }
 

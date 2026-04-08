@@ -52,6 +52,7 @@ set(PRJ_HEADERS
     include/Settings.h
     include/Profiling.h
     include/ChronoWrapper.h
+    include/TConnectionLimiter.h
 )
 # add all source files (.cpp) to this, except the one with main()
 set(PRJ_SOURCES
@@ -78,6 +79,7 @@ set(PRJ_SOURCES
     src/Settings.cpp
     src/Profiling.cpp
     src/ChronoWrapper.cpp
+    src/TConnectionLimiter.cpp
 )
 
 find_package(Lua REQUIRED)
