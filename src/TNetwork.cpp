@@ -245,23 +245,27 @@ void TNetwork::TCPServerMain() {
                 beammp_debug("shutdown during TCP wait for accept loop");
                 break;
             }
-            boost::asio::ip::tcp::endpoint ClientEp;
-            boost::asio::ip::tcp::socket ClientSocket = Acceptor.accept(ClientEp, ec);
-            std::string ClientIP = ClientEp.address().to_string();
-            if (!ec) {
-                auto MaybeGuard = mConnectionLimiter.TryAcquire(ClientEp.address().to_v6().to_string());
-                if (MaybeGuard.has_value()) {
-                    // move-swap to avoid copy ctor (deleted)
-                    auto Guard = std::move(MaybeGuard.value());
-                    TConnection Conn { std::move(ClientSocket), ClientEp };
-                    std::thread ID(&TNetwork::Identify, this, std::move(Conn), std::move(Guard));
-                    ID.detach(); // TODO: Add to a queue and attempt to join periodically
-                } else {
-                    beammp_errorf("Connection rejected for {} due to the global or concurrent connection limit", ClientIP);
-                }
-            } else {
+            boost::asio::ip::tcp::socket ClientSocket = Acceptor.accept(ec);
+            if (ec) {
                 beammp_errorf("Failed to accept() new client: {}", ec.message());
+                continue;
             }
+            boost::asio::ip::tcp::endpoint ClientEp = ClientSocket.remote_endpoint(ec);
+            if (ec) {
+                beammp_errorf("Accepted socket but failed to query remote endpoint for IP address: {}", ec.message());
+                continue;
+            }
+            std::string ClientIP = ClientEp.address().to_string();
+            auto MaybeGuard = mConnectionLimiter.TryAcquire(ClientIP);
+            if (!MaybeGuard.has_value()) {
+                beammp_errorf("Connection rejected for {} due to the global or concurrent connection limit", ClientIP);
+                continue;
+            }
+            // move-swap to avoid copy ctor (deleted)
+            auto Guard = std::move(MaybeGuard.value());
+            TConnection Conn { std::move(ClientSocket), ClientEp };
+            std::thread ID(&TNetwork::Identify, this, std::move(Conn), std::move(Guard));
+            ID.detach(); // TODO: Add to a queue and attempt to join periodically
         } catch (const std::exception& e) {
             beammp_errorf("Exception in accept routine: {}", e.what());
         }
