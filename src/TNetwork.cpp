@@ -32,6 +32,7 @@
 #include <boost/asio/ip/address_v4.hpp>
 #include <boost/asio/ip/address_v6.hpp>
 #include <boost/asio/ip/v6_only.hpp>
+#include <boost/asio/socket_base.hpp>
 #include <cstring>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -54,6 +55,75 @@ static void CompressProperly(std::vector<uint8_t>& Data) {
     CombinedData.resize(ABG.size() + CompData.size());
     std::copy(CompData.begin(), CompData.end(), CombinedData.begin() + ABG.size());
     Data = CombinedData;
+}
+
+static boost::system::error_code ReadSocketWithTimeout(ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
+    boost::system::error_code Ec;
+    const bool WasNonBlocking = Socket.non_blocking();
+    Socket.non_blocking(true, Ec);
+    if (Ec) {
+        return Ec;
+    }
+
+    auto RestoreBlockingMode = [&]() {
+        boost::system::error_code IgnoreEc;
+        Socket.non_blocking(WasNonBlocking, IgnoreEc);
+    };
+
+    const auto Deadline = std::chrono::steady_clock::now() + Timeout;
+    auto* Data = static_cast<uint8_t*>(Buf);
+    size_t TotalRead = 0;
+
+    while (TotalRead < Len) {
+        const size_t BytesRead = Socket.read_some(boost::asio::buffer(Data + TotalRead, Len - TotalRead), Ec);
+        if (!Ec) {
+            TotalRead += BytesRead;
+            continue;
+        }
+
+        if (Ec == error::would_block || Ec == error::try_again) {
+            if (std::chrono::steady_clock::now() >= Deadline) {
+                RestoreBlockingMode();
+                return error::timed_out;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        RestoreBlockingMode();
+        return Ec;
+    }
+
+    RestoreBlockingMode();
+    return Ec;
+}
+
+// for unit-tests, otherwise unused
+static bool OpenLoopbackSocketPair(io_context& IoCtx, ip::tcp::socket& ClientSocket, ip::tcp::socket& ServerSocket, boost::system::error_code& Ec) {
+    ip::tcp::acceptor Acceptor(IoCtx);
+    Acceptor.open(ip::tcp::v4(), Ec);
+    if (Ec) {
+        return true;
+    }
+    Acceptor.bind(ip::tcp::endpoint(ip::address_v4::loopback(), 0), Ec);
+    if (Ec) {
+        return true;
+    }
+    Acceptor.listen(socket_base::max_listen_connections, Ec);
+    if (Ec) {
+        return true;
+    }
+
+    const auto Port = Acceptor.local_endpoint(Ec).port();
+    if (Ec) {
+        return true;
+    }
+    ClientSocket.connect(ip::tcp::endpoint(ip::address_v4::loopback(), Port), Ec);
+    if (Ec) {
+        return true;
+    }
+    Acceptor.accept(ServerSocket, Ec);
+    return true;
 }
 
 TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& ResourceManager)
@@ -741,30 +811,78 @@ void TNetwork::UpdatePlayer(TClient& Client) {
 
 boost::system::error_code TNetwork::ReadWithTimeout(TConnection& Connection, void *Buf, size_t Len, std::chrono::steady_clock::duration Timeout)
 {
-    io_context TimerIO;
-    steady_timer Timer(TimerIO);
-    Timer.expires_after(Timeout);
+    return ReadSocketWithTimeout(Connection.Socket, Buf, Len, Timeout);
+}
 
-    std::atomic<bool> TimedOut = false;
+TEST_CASE("ReadSocketWithTimeout returns timed_out when peer sends no data") {
+    io_context IoCtx;
+    boost::system::error_code Ec;
+    ip::tcp::socket ClientSocket(IoCtx);
+    ip::tcp::socket ServerSocket(IoCtx);
+    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    REQUIRE(!Ec);
 
-    Timer.async_wait([&](const boost::system::error_code& ec) {
-        if (!ec) {
-            TimedOut = true;
-            Connection.Socket.cancel();
-        }
-    });
-    std::thread TimerThread([&]() { TimerIO.run(); });
+    uint8_t ReadByte = 0;
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &ReadByte, 1, std::chrono::milliseconds(50));
 
-    boost::system::error_code ReadEc;
-    boost::asio::read(Connection.Socket, boost::asio::buffer(Buf, Len), ReadEc);
+    CHECK(ReadEc == error::timed_out);
+}
 
-    TimerIO.stop();
-    TimerThread.join();
+TEST_CASE("ReadSocketWithTimeout reads small payload") {
+    io_context IoCtx;
+    boost::system::error_code Ec;
+    ip::tcp::socket ClientSocket(IoCtx);
+    ip::tcp::socket ServerSocket(IoCtx);
+    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    REQUIRE(!Ec);
 
-    if (TimedOut.load()) {
-        return error::timed_out; // synthesize a clean timeout error
-    }
-    return ReadEc; //Succes!
+    const std::array<uint8_t, 2> Sent { 'O', 'K' };
+    boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
+    REQUIRE(!Ec);
+    std::array<uint8_t, 2> Received {};
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::milliseconds(200));
+
+    CHECK(!ReadEc);
+    CHECK(Received == Sent);
+}
+
+TEST_CASE("ReadSocketWithTimeout reads large payload") {
+    io_context IoCtx;
+    boost::system::error_code Ec;
+    ip::tcp::socket ClientSocket(IoCtx);
+    ip::tcp::socket ServerSocket(IoCtx);
+    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    REQUIRE(!Ec);
+
+    constexpr size_t PacketSize = 2 * 1024 * 1024;
+    std::vector<uint8_t> Sent(PacketSize, uint8_t(0x7A));
+    boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
+    REQUIRE(!Ec);
+    std::vector<uint8_t> Received(PacketSize);
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::seconds(2));
+
+    CHECK(!ReadEc);
+    CHECK(Received == Sent);
+}
+
+TEST_CASE("ReadSocketWithTimeout can timeout then retry successfully") {
+    io_context IoCtx;
+    boost::system::error_code Ec;
+    ip::tcp::socket ClientSocket(IoCtx);
+    ip::tcp::socket ServerSocket(IoCtx);
+    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    REQUIRE(!Ec);
+
+    uint8_t Received = 0;
+    CHECK(ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(20)) == error::timed_out);
+
+    const uint8_t Sent = 0x42;
+    boost::asio::write(ClientSocket, boost::asio::buffer(&Sent, 1), Ec);
+    REQUIRE(!Ec);
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(200));
+
+    CHECK(!ReadEc);
+    CHECK(Received == Sent);
 }
 
 void TNetwork::OnDisconnect(const std::weak_ptr<TClient>& ClientPtr) {
