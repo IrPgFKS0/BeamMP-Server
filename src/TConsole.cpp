@@ -653,6 +653,7 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
     SystemsShutdownList = SystemsShutdownList.substr(0, SystemsShutdownList.size() - 2);
 
     auto ElapsedTime = mLuaEngine->Server().UptimeTimer.GetElapsedTime();
+    auto ConnectionLimiterStats = mLuaEngine->Network().GetConnectionLimiterStats();
 
     Status << "BeamMP-Server Status:\n"
            << "\tTotal Players:             " << mLuaEngine->Server().ClientCount() << "\n"
@@ -667,6 +668,11 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
            << "\t\tStates:                      " << mLuaEngine->GetLuaStateCount() << "\n"
            << "\t\tEvent timers:                " << mLuaEngine->GetTimedEventsCount() << "\n"
            << "\t\tEvent handlers:              " << mLuaEngine->GetRegisteredEventHandlerCount() << "\n"
+           << "\tConnection limiter:\n"
+           << "\t\tActive/Max global:           " << ConnectionLimiterStats.CurrentGlobal << "/" << ConnectionLimiterStats.MaxGlobal << "\n"
+           << "\t\tActive IP buckets:           " << ConnectionLimiterStats.ActiveIpBuckets << "\n"
+           << "\t\tHighest single IP load:      " << ConnectionLimiterStats.CurrentMaxPerIp << "/" << ConnectionLimiterStats.MaxPerIp << "\n"
+           << "\t\tSaturated IP buckets:        " << ConnectionLimiterStats.SaturatedIpBuckets << "\n"
            << "\tSubsystems:\n"
            << "\t\tGood/Starting/Bad:           " << SystemsGood << "/" << SystemsStarting << "/" << SystemsBad << "\n"
            << "\t\tShutting down/Shut down:     " << SystemsShuttingDown << "/" << SystemsShutdown << "\n"

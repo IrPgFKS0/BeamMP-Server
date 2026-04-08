@@ -32,6 +32,24 @@ std::optional<TConnectionLimiter::TGuard> TConnectionLimiter::TryAcquire(const s
     return TGuard(this, ip);
 }
 
+TConnectionLimiter::TStats TConnectionLimiter::GetStats() {
+    std::unique_lock Lock { mMutex };
+    TStats Stats;
+    Stats.CurrentGlobal = mGlobal;
+    Stats.MaxGlobal = mMaxGlobal;
+    Stats.ActiveIpBuckets = mPerIp.size();
+    Stats.MaxPerIp = mMaxPerIp;
+    for (const auto& [_, Count] : mPerIp) {
+        if (Count > Stats.CurrentMaxPerIp) {
+            Stats.CurrentMaxPerIp = Count;
+        }
+        if (Count >= mMaxPerIp) {
+            ++Stats.SaturatedIpBuckets;
+        }
+    }
+    return Stats;
+}
+
 TConnectionLimiter::TGuard::TGuard(TConnectionLimiter* owner, std::string ip)
     : mOwner(owner)
     , mIp(std::move(ip)) {

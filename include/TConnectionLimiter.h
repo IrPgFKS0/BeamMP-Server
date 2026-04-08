@@ -8,6 +8,15 @@
 
 class TConnectionLimiter {
 public:
+    struct TStats {
+        size_t CurrentGlobal = 0;
+        size_t MaxGlobal = 0;
+        size_t ActiveIpBuckets = 0;
+        size_t CurrentMaxPerIp = 0;
+        size_t MaxPerIp = 0;
+        size_t SaturatedIpBuckets = 0;
+    };
+
     class TGuard {
     public:
         TGuard() = default;
@@ -36,6 +45,7 @@ public:
     TConnectionLimiter(size_t maxPerIp, size_t maxGlobal);
 
     [[nodiscard]] std::optional<TGuard> TryAcquire(const std::string& ip);
+    [[nodiscard]] TStats GetStats();
 
 private:
     void Release(const std::string& ip) {

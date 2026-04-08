@@ -48,6 +48,7 @@ public:
     void SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self, bool Rel);
     void UpdatePlayer(TClient& Client);
     boost::system::error_code ReadWithTimeout(TConnection& Connection, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout);
+    [[nodiscard]] TConnectionLimiter::TStats GetConnectionLimiterStats() { return mConnectionLimiter.GetStats(); }
 
     TResourceManager& ResourceManager() const { return mResourceManager; }
 
