@@ -1108,17 +1108,40 @@ void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name
     // native handle, needed in order to make native syscalls with it
     int socket = c.GetTCPSock().native_handle();
 
-    ssize_t ret = 0;
-    auto ToSendTotal = Size;
-    auto Start = 0;
-    while (ret < ssize_t(ToSendTotal)) {
-        auto SysOffset = off_t(Start + size_t(ret));
-        ret = sendfile(socket, fd, &SysOffset, ToSendTotal - size_t(ret));
-        if (ret < 0) {
-            beammp_errorf("Failed to send mod '{}' to client {}: {}", Name, c.GetID(), std::strerror(errno));
+    const auto ToSendTotal = Size;
+    size_t TotalSent = 0;
+    while (TotalSent < ToSendTotal) {
+        off_t SysOffset = off_t(TotalSent);
+        const ssize_t SentNow = sendfile(socket, fd, &SysOffset, ToSendTotal - TotalSent);
+        if (SentNow > 0) {
+            TotalSent += size_t(SentNow);
+            continue;
+        }
+        if (SentNow == 0) {
+            beammp_errorf("Failed to send mod '{}' to client {}: sendfile returned 0 before all bytes were sent", Name, c.GetID());
+            ::close(fd);
+            DisconnectClient(c, "sendfile returned 0 during mod download");
             return;
         }
+
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN
+#if EWOULDBLOCK != EAGAIN
+            || errno == EWOULDBLOCK
+#endif
+        ) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        beammp_errorf("Failed to send mod '{}' to client {}: {}", Name, c.GetID(), std::strerror(errno));
+        ::close(fd);
+        DisconnectClient(c, "sendfile failed during mod download");
+        return;
     }
+    ::close(fd);
 
 #else
     std::ifstream f(Name.c_str(), std::ios::binary);
