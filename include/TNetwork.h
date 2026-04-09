@@ -35,7 +35,7 @@ public:
     [[nodiscard]] bool SendLarge(TClient& c, std::vector<uint8_t> Data, bool isSync = false);
     [[nodiscard]] bool Respond(TClient& c, const std::vector<uint8_t>& MSG, bool Rel, bool isSync = false);
     std::shared_ptr<TClient> CreateClient(boost::asio::ip::tcp::socket&& TCPSock);
-    std::vector<uint8_t> TCPRcv(TClient& c);
+    std::vector<uint8_t> TCPRcv(TClient& c, bool WithTimeout = false);
     void ClientKick(TClient& c, const std::string& R);
     void DisconnectClient(const std::weak_ptr<TClient>& c, const std::string& R);
     void DisconnectClient(TClient& c, const std::string& R);
@@ -46,6 +46,7 @@ public:
     [[nodiscard]] bool UDPSend(TClient& Client, std::vector<uint8_t> Data);
     void SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self, bool Rel);
     void UpdatePlayer(TClient& Client);
+    boost::system::error_code ReadWithTimeout(boost::asio::ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout);
     boost::system::error_code ReadWithTimeout(TConnection& Connection, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout);
     [[nodiscard]] TConnectionLimiter::TStats GetConnectionLimiterStats() { return mConnectionLimiter.GetStats(); }
 

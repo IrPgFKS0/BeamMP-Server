@@ -388,7 +388,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
 
     beammp_info("Identifying new ClientConnection...");
 
-    auto Data = TCPRcv(*Client);
+    auto Data = TCPRcv(*Client, true);
 
     constexpr std::string_view VC = "VC";
     if (Data.size() > 3 && std::equal(Data.begin(), Data.begin() + VC.size(), VC.begin(), VC.end())) {
@@ -410,7 +410,7 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         // TODO: handle
     }
 
-    Data = TCPRcv(*Client);
+    Data = TCPRcv(*Client, true);
 
     if (Data.size() > 50) {
         ClientKick(*Client, "Invalid Key (too long)!");
@@ -586,7 +586,7 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
     return true;
 }
 
-std::vector<uint8_t> TNetwork::TCPRcv(TClient& c) {
+std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
     if (c.IsDisconnected()) {
         beammp_error("Client disconnected, cancelling TCPRcv");
         return { };
@@ -597,7 +597,11 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c) {
 
     boost::system::error_code ec;
     std::array<uint8_t, sizeof(Header)> HeaderData;
-    boost::asio::read(Sock, boost::asio::buffer(HeaderData), ec);
+    if (WithTimeout) {
+        ec = ReadWithTimeout(Sock, HeaderData.data(), HeaderData.size(), std::chrono::seconds(READ_TIMEOUT_S));
+    } else {
+        boost::asio::read(Sock, boost::asio::buffer(HeaderData), ec);
+    }
     if (ec) {
         // TODO: handle this case (read failed)
         beammp_debugf("TCPRcv: Reading header failed: {}", ec.message());
@@ -622,7 +626,17 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c) {
         beammp_warn("Client " + c.GetName() + " (" + std::to_string(c.GetID()) + ") sent header larger than expected - assuming malicious intent and disconnecting the client.");
         return { };
     }
-    auto N = boost::asio::read(Sock, boost::asio::buffer(Data), ec);
+    std::size_t N = 0;
+    if (WithTimeout) {
+        if (!Data.empty()) {
+            ec = ReadWithTimeout(Sock, Data.data(), Data.size(), std::chrono::seconds(READ_TIMEOUT_S));
+            if (!ec) {
+                N = Data.size();
+            }
+        }
+    } else {
+        N = boost::asio::read(Sock, boost::asio::buffer(Data), ec);
+    }
     if (ec) {
         // TODO: handle this case properly
         beammp_debugf("TCPRcv: Reading data failed: {}", ec.message());
@@ -776,7 +790,11 @@ static boost::system::error_code ReadSocketWithTimeout(
     std::chrono::steady_clock::duration timeout);
 
 boost::system::error_code TNetwork::ReadWithTimeout(TConnection& Connection, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
-    return ReadSocketWithTimeout(mServer.IoCtx(), Connection.Socket, Buf, Len, Timeout);
+    return ReadWithTimeout(Connection.Socket, Buf, Len, Timeout);
+}
+
+boost::system::error_code TNetwork::ReadWithTimeout(boost::asio::ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
+    return ReadSocketWithTimeout(mServer.IoCtx(), Socket, Buf, Len, Timeout);
 }
 
 static boost::system::error_code ReadSocketWithTimeout(
