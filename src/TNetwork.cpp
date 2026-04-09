@@ -389,6 +389,11 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     beammp_info("Identifying new ClientConnection...");
 
     auto Data = TCPRcv(*Client, true);
+    if (Data.empty()) {
+        beammp_debug("Authentication failed: did not receive version packet");
+        ClientKick(*Client, "Connection closed during version handshake");
+        return nullptr;
+    }
 
     constexpr std::string_view VC = "VC";
     if (Data.size() > 3 && std::equal(Data.begin(), Data.begin() + VC.size(), VC.begin(), VC.end())) {
@@ -411,6 +416,11 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     }
 
     Data = TCPRcv(*Client, true);
+    if (Data.empty()) {
+        beammp_debug("Authentication failed: did not receive auth key packet");
+        ClientKick(*Client, "Connection closed during authentication");
+        return nullptr;
+    }
 
     if (Data.size() > 50) {
         ClientKick(*Client, "Invalid Key (too long)!");
@@ -418,6 +428,10 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     }
 
     std::string Key(reinterpret_cast<const char*>(Data.data()), Data.size());
+    if (Key.empty()) {
+        ClientKick(*Client, "Invalid Key (empty)!");
+        return nullptr;
+    }
     std::string AuthKey = Application::Settings.getAsString(Settings::Key::General_AuthKey);
     std::string ClientIp = Client->GetIdentifiers().at("ip");
 
@@ -783,7 +797,6 @@ void TNetwork::UpdatePlayer(TClient& Client) {
 }
 
 static boost::system::error_code ReadSocketWithTimeout(
-    boost::asio::io_context& io,
     boost::asio::ip::tcp::socket& socket,
     void* buffer,
     std::size_t length,
@@ -794,11 +807,10 @@ boost::system::error_code TNetwork::ReadWithTimeout(TConnection& Connection, voi
 }
 
 boost::system::error_code TNetwork::ReadWithTimeout(boost::asio::ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
-    return ReadSocketWithTimeout(mServer.IoCtx(), Socket, Buf, Len, Timeout);
+    return ReadSocketWithTimeout(Socket, Buf, Len, Timeout);
 }
 
 static boost::system::error_code ReadSocketWithTimeout(
-    boost::asio::io_context& IoCtx,
     boost::asio::ip::tcp::socket& Socket,
     void* Buffer,
     std::size_t Length,
@@ -807,15 +819,15 @@ static boost::system::error_code ReadSocketWithTimeout(
     using boost::system::error_code;
 
     struct TTimeoutState {
-        explicit TTimeoutState(asio::io_context& IoCtx)
-            : Timer(IoCtx) { }
+        explicit TTimeoutState(const boost::asio::any_io_executor& Executor)
+            : Timer(Executor) { }
 
         asio::steady_timer Timer;
         std::promise<std::pair<error_code, std::size_t>> Promise;
         std::atomic_bool Completed { false };
     };
 
-    auto State = std::make_shared<TTimeoutState>(IoCtx);
+    auto State = std::make_shared<TTimeoutState>(Socket.get_executor());
     auto Future = State->Promise.get_future();
 
     asio::async_read(
@@ -854,7 +866,7 @@ TEST_CASE("ReadSocketWithTimeout returns timed_out when peer sends no data") {
     REQUIRE(!Ec);
 
     uint8_t ReadByte = 0;
-    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, &ReadByte, 1, std::chrono::milliseconds(50));
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &ReadByte, 1, std::chrono::milliseconds(50));
 
     CHECK(ReadEc == error::timed_out);
 }
@@ -871,7 +883,7 @@ TEST_CASE("ReadSocketWithTimeout reads small payload") {
     boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
     REQUIRE(!Ec);
     std::array<uint8_t, 2> Received { };
-    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, Received.data(), Received.size(), std::chrono::milliseconds(200));
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::milliseconds(200));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
@@ -890,7 +902,7 @@ TEST_CASE("ReadSocketWithTimeout reads large payload") {
     boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
     REQUIRE(!Ec);
     std::vector<uint8_t> Received(PacketSize);
-    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, Received.data(), Received.size(), std::chrono::seconds(2));
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::seconds(2));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
@@ -905,12 +917,12 @@ TEST_CASE("ReadSocketWithTimeout can timeout then retry successfully") {
     REQUIRE(!Ec);
 
     uint8_t Received = 0;
-    CHECK(ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, &Received, 1, std::chrono::milliseconds(20)) == error::timed_out);
+    CHECK(ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(20)) == error::timed_out);
 
     const uint8_t Sent = 0x42;
     boost::asio::write(ClientSocket, boost::asio::buffer(&Sent, 1), Ec);
     REQUIRE(!Ec);
-    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, &Received, 1, std::chrono::milliseconds(200));
+    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(200));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
@@ -1003,6 +1015,7 @@ void TNetwork::SyncResources(TClient& c) {
     while (!c.IsDisconnected()) {
         Data = TCPRcv(c);
         if (Data.empty()) {
+            DisconnectClient(c, "TCPRcv failed during resource sync");
             break;
         }
         constexpr std::string_view Done = "Done";
