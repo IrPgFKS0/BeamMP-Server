@@ -43,7 +43,7 @@ struct CurlDeleter {
 
 static std::mutex gCurlPoolMutex;
 static std::map<CURL*, bool> gCurlPool; // false = free, true = in use
-constexpr size_t MAX_CURL_POOL_SIZE = 8;
+constexpr size_t MAX_CURL_POOL_SIZE = 128;
 
 static CURL* AcquireCurl() {
     std::unique_lock Lock(gCurlPoolMutex);
