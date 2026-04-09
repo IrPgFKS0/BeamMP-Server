@@ -63,15 +63,6 @@ TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& R
     Application::SetSubsystemStatus("TCPNetwork", Application::Status::Starting);
     Application::SetSubsystemStatus("UDPNetwork", Application::Status::Starting);
     Application::RegisterShutdownHandler([&] {
-        beammp_debug("Kicking all players due to shutdown");
-        Server.ForEachClient([&](std::weak_ptr<TClient> client) -> bool {
-            if (!client.expired()) {
-                ClientKick(*client.lock(), "Server shutdown");
-            }
-            return true;
-        });
-    });
-    Application::RegisterShutdownHandler([&] {
         Application::SetSubsystemStatus("UDPNetwork", Application::Status::ShuttingDown);
         if (mUDPThread.joinable()) {
             mUDPThread.detach();
