@@ -175,10 +175,6 @@ int BeamMPServerMain(MainArguments Arguments) {
         Application::SetSubsystemStatus("Main", Application::Status::ShuttingDown);
         Shutdown = true;
     });
-    Application::RegisterShutdownHandler([] {
-        auto Futures = LuaAPI::MP::Engine->TriggerEvent("onShutdown", "");
-        TLuaEngine::WaitForAll(Futures, std::chrono::seconds(5));
-    });
 
     TServer Server(Arguments.List);
 
@@ -195,6 +191,10 @@ int BeamMPServerMain(MainArguments Arguments) {
     LuaEngine->SetServer(&Server);
     Application::Console().InitializeLuaConsole(*LuaEngine);
     LuaEngine->SetNetwork(&Network);
+    Application::RegisterShutdownHandler([] {
+        auto Futures = LuaAPI::MP::Engine->TriggerEvent("onShutdown", "");
+        TLuaEngine::WaitForAll(Futures, std::chrono::seconds(5));
+    });
     PPSMonitor.SetNetwork(Network);
     Application::CheckForUpdates();
 
