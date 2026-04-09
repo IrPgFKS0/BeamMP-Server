@@ -28,12 +28,16 @@
 #include <CustomAssert.h>
 #include <Http.h>
 #include <array>
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/address_v4.hpp>
 #include <boost/asio/ip/address_v6.hpp>
 #include <boost/asio/ip/v6_only.hpp>
 #include <boost/asio/socket_base.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <zlib.h>
@@ -55,47 +59,6 @@ static void CompressProperly(std::vector<uint8_t>& Data) {
     CombinedData.resize(ABG.size() + CompData.size());
     std::copy(CompData.begin(), CompData.end(), CombinedData.begin() + ABG.size());
     Data = CombinedData;
-}
-
-static boost::system::error_code ReadSocketWithTimeout(ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
-    boost::system::error_code Ec;
-    const bool WasNonBlocking = Socket.non_blocking();
-    Socket.non_blocking(true, Ec);
-    if (Ec) {
-        return Ec;
-    }
-
-    auto RestoreBlockingMode = [&]() {
-        boost::system::error_code IgnoreEc;
-        Socket.non_blocking(WasNonBlocking, IgnoreEc);
-    };
-
-    const auto Deadline = std::chrono::steady_clock::now() + Timeout;
-    auto* Data = static_cast<uint8_t*>(Buf);
-    size_t TotalRead = 0;
-
-    while (TotalRead < Len) {
-        const size_t BytesRead = Socket.read_some(boost::asio::buffer(Data + TotalRead, Len - TotalRead), Ec);
-        if (!Ec) {
-            TotalRead += BytesRead;
-            continue;
-        }
-
-        if (Ec == error::would_block || Ec == error::try_again) {
-            if (std::chrono::steady_clock::now() >= Deadline) {
-                RestoreBlockingMode();
-                return error::timed_out;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-
-        RestoreBlockingMode();
-        return Ec;
-    }
-
-    RestoreBlockingMode();
-    return Ec;
 }
 
 // for unit-tests, otherwise unused
@@ -131,7 +94,8 @@ TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& R
     , mPPSMonitor(PPSMonitor)
     , mUDPSock(Server.IoCtx())
     , mResourceManager(ResourceManager)
-    , mConnectionLimiter(MAX_CONCURRENT_CONNECTIONS, MAX_GLOBAL_CONNECTIONS){
+    , mIoCtxPoller()
+    , mConnectionLimiter(MAX_CONCURRENT_CONNECTIONS, MAX_GLOBAL_CONNECTIONS) {
     Application::SetSubsystemStatus("TCPNetwork", Application::Status::Starting);
     Application::SetSubsystemStatus("UDPNetwork", Application::Status::Starting);
     Application::RegisterShutdownHandler([&] {
@@ -809,49 +773,103 @@ void TNetwork::UpdatePlayer(TClient& Client) {
     //(void)Respond(Client, Packet, true);
 }
 
-boost::system::error_code TNetwork::ReadWithTimeout(TConnection& Connection, void *Buf, size_t Len, std::chrono::steady_clock::duration Timeout)
-{
-    return ReadSocketWithTimeout(Connection.Socket, Buf, Len, Timeout);
+static boost::system::error_code ReadSocketWithTimeout(
+    boost::asio::io_context& io,
+    boost::asio::ip::tcp::socket& socket,
+    void* buffer,
+    std::size_t length,
+    std::chrono::steady_clock::duration timeout);
+
+boost::system::error_code TNetwork::ReadWithTimeout(TConnection& Connection, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout) {
+    return ReadSocketWithTimeout(mIoCtxPoller.IoCtx(), Connection.Socket, Buf, Len, Timeout);
+}
+
+static boost::system::error_code ReadSocketWithTimeout(
+    boost::asio::io_context& IoCtx,
+    boost::asio::ip::tcp::socket& Socket,
+    void* Buffer,
+    std::size_t Length,
+    std::chrono::steady_clock::duration Timeout) {
+    namespace asio = boost::asio;
+    using boost::system::error_code;
+
+    struct TTimeoutState {
+        explicit TTimeoutState(asio::io_context& IoCtx)
+            : Timer(IoCtx) { }
+
+        asio::steady_timer Timer;
+        std::promise<std::pair<error_code, std::size_t>> Promise;
+        std::atomic_bool Completed { false };
+    };
+
+    auto State = std::make_shared<TTimeoutState>(IoCtx);
+    auto Future = State->Promise.get_future();
+
+    asio::async_read(
+        Socket,
+        asio::buffer(Buffer, Length),
+        [State](error_code ec, std::size_t n) {
+            if (!State->Completed.exchange(true)) {
+                State->Timer.cancel();
+                State->Promise.set_value({ ec, n });
+            }
+        });
+
+    State->Timer.expires_after(Timeout);
+    State->Timer.async_wait(
+        [State, &Socket](error_code ec) {
+            if (ec == asio::error::operation_aborted)
+                return;
+
+            if (!State->Completed.exchange(true)) {
+                error_code IgnoredEc;
+                Socket.cancel(IgnoredEc);
+                State->Promise.set_value({ asio::error::timed_out, 0 });
+            }
+        });
+
+    auto [ec, NRead] = Future.get();
+    return ec;
 }
 
 TEST_CASE("ReadSocketWithTimeout returns timed_out when peer sends no data") {
-    io_context IoCtx;
+    TIoPollThread TimerThread;
     boost::system::error_code Ec;
-    ip::tcp::socket ClientSocket(IoCtx);
-    ip::tcp::socket ServerSocket(IoCtx);
-    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    ip::tcp::socket ClientSocket(TimerThread.IoCtx());
+    ip::tcp::socket ServerSocket(TimerThread.IoCtx());
+    OpenLoopbackSocketPair(TimerThread.IoCtx(), ClientSocket, ServerSocket, Ec);
     REQUIRE(!Ec);
 
     uint8_t ReadByte = 0;
-    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &ReadByte, 1, std::chrono::milliseconds(50));
+    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, &ReadByte, 1, std::chrono::milliseconds(50));
 
     CHECK(ReadEc == error::timed_out);
 }
 
 TEST_CASE("ReadSocketWithTimeout reads small payload") {
-    io_context IoCtx;
+    TIoPollThread TimerThread;
     boost::system::error_code Ec;
-    ip::tcp::socket ClientSocket(IoCtx);
-    ip::tcp::socket ServerSocket(IoCtx);
-    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    ip::tcp::socket ClientSocket(TimerThread.IoCtx());
+    ip::tcp::socket ServerSocket(TimerThread.IoCtx());
+    OpenLoopbackSocketPair(TimerThread.IoCtx(), ClientSocket, ServerSocket, Ec);
     REQUIRE(!Ec);
 
     const std::array<uint8_t, 2> Sent { 'O', 'K' };
     boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
     REQUIRE(!Ec);
-    std::array<uint8_t, 2> Received {};
-    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::milliseconds(200));
+    std::array<uint8_t, 2> Received { };
+    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, Received.data(), Received.size(), std::chrono::milliseconds(200));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
 }
 
 TEST_CASE("ReadSocketWithTimeout reads large payload") {
-    io_context IoCtx;
+    TIoPollThread TimerThread;
     boost::system::error_code Ec;
-    ip::tcp::socket ClientSocket(IoCtx);
-    ip::tcp::socket ServerSocket(IoCtx);
-    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    ip::tcp::socket ClientSocket(TimerThread.IoCtx());
+    ip::tcp::socket ServerSocket(TimerThread.IoCtx());
+    OpenLoopbackSocketPair(TimerThread.IoCtx(), ClientSocket, ServerSocket, Ec);
     REQUIRE(!Ec);
 
     constexpr size_t PacketSize = 2 * 1024 * 1024;
@@ -859,27 +877,27 @@ TEST_CASE("ReadSocketWithTimeout reads large payload") {
     boost::asio::write(ClientSocket, boost::asio::buffer(Sent), Ec);
     REQUIRE(!Ec);
     std::vector<uint8_t> Received(PacketSize);
-    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, Received.data(), Received.size(), std::chrono::seconds(2));
+    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, Received.data(), Received.size(), std::chrono::seconds(2));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
 }
 
 TEST_CASE("ReadSocketWithTimeout can timeout then retry successfully") {
-    io_context IoCtx;
+    TIoPollThread TimerThread;
     boost::system::error_code Ec;
-    ip::tcp::socket ClientSocket(IoCtx);
-    ip::tcp::socket ServerSocket(IoCtx);
-    OpenLoopbackSocketPair(IoCtx, ClientSocket, ServerSocket, Ec);
+    ip::tcp::socket ClientSocket(TimerThread.IoCtx());
+    ip::tcp::socket ServerSocket(TimerThread.IoCtx());
+    OpenLoopbackSocketPair(TimerThread.IoCtx(), ClientSocket, ServerSocket, Ec);
     REQUIRE(!Ec);
 
     uint8_t Received = 0;
-    CHECK(ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(20)) == error::timed_out);
+    CHECK(ReadSocketWithTimeout(TimerThread.get(), ServerSocket, &Received, 1, std::chrono::milliseconds(20)) == error::timed_out);
 
     const uint8_t Sent = 0x42;
     boost::asio::write(ClientSocket, boost::asio::buffer(&Sent, 1), Ec);
     REQUIRE(!Ec);
-    const auto ReadEc = ReadSocketWithTimeout(ServerSocket, &Received, 1, std::chrono::milliseconds(200));
+    const auto ReadEc = ReadSocketWithTimeout(TimerThread.IoCtx(), ServerSocket, &Received, 1, std::chrono::milliseconds(200));
 
     CHECK(!ReadEc);
     CHECK(Received == Sent);
@@ -1047,9 +1065,9 @@ void TNetwork::SendFile(TClient& c, const std::string& UnsafeName) {
 #if defined(BEAMMP_LINUX)
 #include <cerrno>
 #include <cstring>
+#include <signal.h>
 #include <sys/sendfile.h>
 #include <unistd.h>
-#include <signal.h>
 #endif
 void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name) {
     TScopedTimer timer(fmt::format("Download of '{}' for client {}", Name, c.GetID()));
@@ -1274,4 +1292,22 @@ std::vector<uint8_t> TNetwork::UDPRcvFromClient(boost::asio::ip::udp::endpoint& 
     }
     beammp_assert(Rcv <= Ret.size());
     return std::vector<uint8_t>(Ret.begin(), Ret.begin() + Rcv);
+}
+
+TIoPollThread::TIoPollThread()
+    : mWorkGuard(boost::asio::make_work_guard(mIoCtx))
+    , mThread([this](std::stop_token StopToken) {
+        while (!StopToken.stop_requested()) {
+            try {
+                mIoCtx.run();
+                break;
+            } catch (...) {
+                mIoCtx.restart();
+            }
+        }
+    }) { }
+
+TIoPollThread::~TIoPollThread() {
+    mWorkGuard.reset();
+    mIoCtx.stop();
 }
