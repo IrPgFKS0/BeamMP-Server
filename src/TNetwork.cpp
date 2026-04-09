@@ -292,7 +292,7 @@ void TNetwork::TCPServerMain() {
             std::string ClientIP = ClientEp.address().to_string();
             auto MaybeGuard = mConnectionLimiter.TryAcquire(ClientIP);
             if (!MaybeGuard.has_value()) {
-                beammp_errorf("Connection rejected for {} due to the global or concurrent connection limit", ClientIP);
+                beammp_debugf("Connection rejected for {} due to the global or concurrent connection limit", ClientIP);
                 continue;
             }
             // move-swap to avoid copy ctor (deleted)
