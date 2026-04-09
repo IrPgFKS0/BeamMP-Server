@@ -23,23 +23,9 @@
 #include "TConnectionLimiter.h"
 #include "TResourceManager.h"
 #include "TServer.h"
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/udp.hpp>
 
 struct TConnection;
-
-class TIoPollThread {
-public:
-    TIoPollThread();
-    ~TIoPollThread();
-
-    boost::asio::io_context& IoCtx() noexcept { return mIoCtx; }
-
-private:
-    boost::asio::io_context mIoCtx;
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> mWorkGuard;
-    std::jthread mThread;
-};
 
 class TNetwork {
 public:
@@ -76,7 +62,6 @@ private:
     std::thread mUDPThread;
     std::thread mTCPThread;
     std::mutex mOpenIDMutex;
-    TIoPollThread mIoCtxPoller;
     TConnectionLimiter mConnectionLimiter;
 
     std::vector<uint8_t> UDPRcvFromClient(boost::asio::ip::udp::endpoint& ClientEndpoint);

@@ -39,6 +39,7 @@ set(PRJ_HEADERS
     include/TConfig.h
     include/TConsole.h
     include/THeartbeatThread.h
+    include/TIoPollThread.h
     include/TLuaEngine.h
     include/TLuaPlugin.h
     include/TNetwork.h
@@ -66,6 +67,7 @@ set(PRJ_SOURCES
     src/TConfig.cpp
     src/TConsole.cpp
     src/THeartbeatThread.cpp
+    src/TIoPollThread.cpp
     src/TLuaEngine.cpp
     src/TLuaPlugin.cpp
     src/TNetwork.cpp
