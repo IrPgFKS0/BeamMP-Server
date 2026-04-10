@@ -224,7 +224,7 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
     case 'p':
         if (!Network.Respond(*LockedClient, StringToVector("p"), false)) {
             // failed to send
-            LockedClient->Disconnect("Failed to send ping");
+            Network.DisconnectClient(*LockedClient, "Failed to send ping");
         } else {
             Network.UpdatePlayer(*LockedClient);
         }

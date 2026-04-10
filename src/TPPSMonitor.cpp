@@ -76,7 +76,7 @@ void TPPSMonitor::operator()() {
             return true;
         });
         for (auto& ClientToKick : TimedOutClients) {
-            ClientToKick->Disconnect("Timeout");
+            Network().DisconnectClient(*ClientToKick, "Timeout");
         }
         TimedOutClients.clear();
         if (C == 0 || mInternalPPS == 0) {

@@ -697,9 +697,8 @@ void TNetwork::DisconnectClient(const std::weak_ptr<TClient>& c, const std::stri
 }
 
 void TNetwork::DisconnectClient(TClient& c, const std::string& R) {
-    if (c.IsDisconnected())
-        return;
-    c.Disconnect(R);
+    // Keep this unconditional; TClient::Disconnect() is the single-winner guard.
+    (void)c.Disconnect(R);
 }
 
 void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
@@ -740,7 +739,7 @@ void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
 
 void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
     // TODO: the c.expired() might cause issues here, remove if you end up here with your debugger
-    if (c.expired() || !c.lock()->GetTCPSock().is_open()) {
+    if (c.expired() || c.lock()->IsDisconnected()) {
         mServer.RemoveClient(c);
         return;
     }
