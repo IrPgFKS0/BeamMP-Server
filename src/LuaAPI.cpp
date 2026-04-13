@@ -440,7 +440,16 @@ void LuaAPI::MP::PrintRaw(sol::variadic_args Args) {
 }
 
 int LuaAPI::PanicHandler(lua_State* State) {
-    beammp_lua_error("PANIC: " + sol::stack::get<std::string>(State, 1));
+    // panic path: use raw lua c api only; sol2 conversions can raise lua_error
+    // and re-enter panic recursively.
+    const int ErrorType = lua_type(State, -1);
+    if (ErrorType == LUA_TSTRING) {
+        const char* Message = lua_tostring(State, -1);
+        beammp_lua_error(std::string("PANIC: ") + (Message ? Message : "(null)"));
+    } else {
+        const char* ErrorTypeName = lua_typename(State, ErrorType);
+        beammp_lua_error(std::string("PANIC: non-string error object (") + (ErrorTypeName ? ErrorTypeName : "unknown") + ")");
+    }
     return 0;
 }
 
