@@ -34,6 +34,7 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <sol/protected_function_result.hpp>
 #include <toml.hpp>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +84,11 @@ struct TLuaResult {
     std::shared_ptr<std::condition_variable> ReadyCondition {
         std::make_shared<std::condition_variable>()
     };
+
+    void SetErrorMessageFromResult(sol::protected_function_result& Res) {
+        auto error = Res.get<std::optional<std::string>>();
+        ErrorMessage = error ? *error : "(unknown error; error object is not a string value)";
+    }
 
     void MarkAsReady();
     void WaitUntilReady();

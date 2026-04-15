@@ -550,8 +550,8 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerLocalEvent(const std::string&
                 Result.set(i, FnRet);
                 ++i;
             } else {
-                sol::error Err = FnRet;
-                beammp_lua_error(std::string("TriggerLocalEvent: ") + Err.what());
+                auto ErrStr = FnRet.get<std::optional<std::string>>();
+                beammp_lua_error(std::string("TriggerLocalEvent: ") + (ErrStr ? *ErrStr : "(unknown error; error object is not a string)"));
             }
         }
     }
@@ -1158,8 +1158,7 @@ void TLuaEngine::StateThreadData::operator()() {
                     S.second->Result = std::move(Res);
                 } else {
                     S.second->Error = true;
-                    sol::error Err = Res;
-                    S.second->ErrorMessage = Err.what();
+                    S.second->SetErrorMessageFromResult(Res);
                 }
                 S.second->MarkAsReady();
             }
@@ -1222,8 +1221,7 @@ void TLuaEngine::StateThreadData::operator()() {
                         Result->Result = std::move(Res);
                     } else {
                         Result->Error = true;
-                        sol::error Err = Res;
-                        Result->ErrorMessage = Err.what();
+                        Result->SetErrorMessageFromResult(Res);
                     }
                     Result->MarkAsReady();
                 } else {
