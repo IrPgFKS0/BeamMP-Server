@@ -550,8 +550,13 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerLocalEvent(const std::string&
                 Result.set(i, FnRet);
                 ++i;
             } else {
-                auto ErrStr = FnRet.get<std::optional<std::string>>();
-                beammp_lua_error(std::string("TriggerLocalEvent: ") + (ErrStr ? *ErrStr : "(unknown error; error object is not a string)"));
+                std::string ErrStr;
+                if (FnRet.get_type() == sol::type::string) {
+                    ErrStr = FnRet.get<sol::error>().what();
+                } else {
+                    ErrStr = "(unknown error; error object is not inspectable)";
+                }
+                beammp_lua_errorf("TriggerLocalEvent: {}", ErrStr);
             }
         }
     }

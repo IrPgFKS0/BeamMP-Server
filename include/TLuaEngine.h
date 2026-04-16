@@ -34,6 +34,7 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <sol/forward.hpp>
 #include <sol/protected_function_result.hpp>
 #include <toml.hpp>
 #include <unordered_map>
@@ -86,8 +87,14 @@ struct TLuaResult {
     };
 
     void SetErrorMessageFromResult(sol::protected_function_result& Res) {
-        auto error = Res.get<std::optional<std::string>>();
-        ErrorMessage = error ? *error : "(unknown error; error object is not a string value)";
+        if (Res.valid()) {
+            beammp_lua_errorf("Error was not an error");
+        }
+        if (Res.get_type() == sol::type::string) {
+            ErrorMessage = Res.get<sol::error>().what();
+        } else {
+            ErrorMessage = "(unknown error; error object is not inspectable)"; 
+        }
     }
 
     void MarkAsReady();
