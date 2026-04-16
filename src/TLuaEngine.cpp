@@ -572,7 +572,7 @@ sol::table TLuaEngine::StateThreadData::Lua_GetPlayerIdentifiers(int ID) {
         }
         sol::table Result = mStateView.create_table();
         for (const auto& Pair : IDs) {
-            Result[Pair.first] = Pair.second;
+            Result.add(Pair.first, Pair.second);
         }
         return Result;
     } else {
