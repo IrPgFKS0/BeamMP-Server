@@ -19,13 +19,12 @@
 #pragma once
 
 #include "Profiling.h"
+#include "TLuaResult.h"
 #include "TNetwork.h"
 #include "TServer.h"
-#include <any>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
-#include <initializer_list>
 #include <list>
 #include <lua.hpp>
 #include <memory>
@@ -71,35 +70,6 @@ enum TLuaType {
 };
 
 class TLuaPlugin;
-
-struct TLuaResult {
-    bool Ready;
-    bool Error;
-    std::string ErrorMessage;
-    sol::object Result { sol::lua_nil };
-    TLuaStateId StateId;
-    std::string Function;
-    std::shared_ptr<std::mutex> ReadyMutex {
-        std::make_shared<std::mutex>()
-    };
-    std::shared_ptr<std::condition_variable> ReadyCondition {
-        std::make_shared<std::condition_variable>()
-    };
-
-    void SetErrorMessageFromResult(sol::protected_function_result& Res) {
-        if (Res.valid()) {
-            beammp_lua_errorf("Error was not an error");
-        }
-        if (Res.get_type() == sol::type::string) {
-            ErrorMessage = Res.get<sol::error>().what();
-        } else {
-            ErrorMessage = "(unknown error; error object is not inspectable)"; 
-        }
-    }
-
-    void MarkAsReady();
-    void WaitUntilReady();
-};
 
 struct TLuaPluginConfig {
     static inline const std::string FileName = "PluginConfig.toml";
@@ -242,7 +212,7 @@ public:
     std::unordered_map<std::string /*event name */, std::vector<std::string> /* handlers */> Debug_GetEventsForState(TLuaStateId StateId);
     std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaResult>>> Debug_GetStateExecuteQueueForState(TLuaStateId StateId);
     std::vector<QueuedFunction> Debug_GetStateFunctionQueueForState(TLuaStateId StateId);
-    std::vector<TLuaResult> Debug_GetResultsToCheckForState(TLuaStateId StateId);
+    std::vector<TLuaResult::DetachedSnapshot> Debug_GetResultsToCheckForState(TLuaStateId StateId);
 
 private:
     void CollectAndInitPlugins();

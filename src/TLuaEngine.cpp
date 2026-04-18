@@ -20,20 +20,25 @@
 #include "Client.h"
 #include "Common.h"
 #include "CustomAssert.h"
+#include "Env.h"
 #include "Http.h"
 #include "LuaAPI.h"
-#include "Env.h"
 #include "Profiling.h"
 #include "TLuaPlugin.h"
+#include "TLuaResult.h"
 #include "sol/object.hpp"
 
 #include <chrono>
 #include <condition_variable>
 #include <fmt/core.h>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <sol/types.hpp>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
+#include <variant>
 
 TLuaEngine* LuaAPI::MP::Engine;
 
@@ -74,8 +79,9 @@ void TLuaEngine::operator()() {
     auto Futures = TriggerEvent("onInit", "");
     WaitForAll(Futures, std::chrono::seconds(5));
     for (const auto& Future : Futures) {
-        if (Future->Error && Future->ErrorMessage != BeamMPFnNotFoundError) {
-            beammp_lua_error("Calling \"onInit\" on \"" + Future->StateId + "\" failed: " + Future->ErrorMessage);
+        auto Snapshot = Future->GetDetachedSnapshot();
+        if (Snapshot.Error && Snapshot.ErrorMessage != BeamMPFnNotFoundError) {
+            beammp_lua_error("Calling \"onInit\" on \"" + Snapshot.StateId + "\" failed: " + Snapshot.ErrorMessage);
         }
     }
 
@@ -85,10 +91,11 @@ void TLuaEngine::operator()() {
             std::unique_lock Lock(mResultsToCheckMutex);
             if (!mResultsToCheck.empty()) {
                 mResultsToCheck.remove_if([](const std::shared_ptr<TLuaResult>& Ptr) -> bool {
-                    if (Ptr->Ready) {
-                        if (Ptr->Error) {
-                            if (Ptr->ErrorMessage != BeamMPFnNotFoundError) {
-                                beammp_lua_error(Ptr->Function + ": " + Ptr->ErrorMessage);
+                    if (Ptr->IsReady()) {
+                        auto Snapshot = Ptr->GetDetachedSnapshot();
+                        if (Snapshot.Error) {
+                            if (Snapshot.ErrorMessage != BeamMPFnNotFoundError) {
+                                beammp_lua_error(Snapshot.Function + ": " + Snapshot.ErrorMessage);
                             }
                         }
                         return true;
@@ -128,6 +135,7 @@ void TLuaEngine::operator()() {
                 }
             }
         }
+        std::unique_lock Lock(mLuaStatesMutex);
         if (mLuaStates.empty()) {
             beammp_trace("No Lua states, event loop running extremely sparsely");
             Application::SleepSafeSeconds(10);
@@ -215,16 +223,16 @@ std::vector<TLuaEngine::QueuedFunction> TLuaEngine::Debug_GetStateFunctionQueueF
     return Result;
 }
 
-std::vector<TLuaResult> TLuaEngine::Debug_GetResultsToCheckForState(TLuaStateId StateId) {
+std::vector<TLuaResult::DetachedSnapshot> TLuaEngine::Debug_GetResultsToCheckForState(TLuaStateId StateId) {
     std::unique_lock Lock(mResultsToCheckMutex);
     auto ResultsToCheckCopy = mResultsToCheck;
     Lock.unlock();
-    std::vector<TLuaResult> Result;
+    std::vector<TLuaResult::DetachedSnapshot> Result;
     while (!ResultsToCheckCopy.empty()) {
         auto ResultToCheck = std::move(ResultsToCheckCopy.front());
         ResultsToCheckCopy.pop_front();
-        if (ResultToCheck->StateId == StateId) {
-            Result.push_back(*ResultToCheck);
+        if (ResultToCheck->OwnerState() == StateId) {
+            Result.push_back(ResultToCheck->GetDetachedSnapshot());
         }
     }
     return Result;
@@ -311,27 +319,30 @@ void TLuaEngine::WaitForAll(std::vector<std::shared_ptr<TLuaResult>>& Results, c
         size_t ms = 0;
         std::set<std::string> WarnedResults;
 
-        while (!Result->Ready && !Cancelled) {
+        while (!Result->IsReady() && !Cancelled) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             ms += 10;
             if (Max.has_value() && std::chrono::milliseconds(ms) > Max.value()) {
-                beammp_trace("'" + Result->Function + "' in '" + Result->StateId + "' did not finish executing in time (took: " + std::to_string(ms) + "ms).");
+                auto Snapshot = Result->GetDetachedSnapshot();
+                beammp_trace("'" + Snapshot.Function + "' in '" + Snapshot.StateId + "' did not finish executing in time (took: " + std::to_string(ms) + "ms).");
                 Cancelled = true;
             } else if (ms > 1000 * 60) {
-                auto ResultId = Result->StateId + "_" + Result->Function;
+                auto Snapshot = Result->GetDetachedSnapshot();
+                auto ResultId = Snapshot.StateId + "_" + Snapshot.Function;
                 if (WarnedResults.count(ResultId) == 0) {
                     WarnedResults.insert(ResultId);
-                    beammp_lua_warn("'" + Result->Function + "' in '" + Result->StateId + "' is taking very long. The event it's handling is too important to discard the result of this handler, but may block this event and possibly the whole lua state.");
+                    beammp_lua_warn("'" + Snapshot.Function + "' in '" + Snapshot.StateId + "' is taking very long. The event it's handling is too important to discard the result of this handler, but may block this event and possibly the whole lua state.");
                 }
             }
         }
 
+        auto Snapshot = Result->GetDetachedSnapshot();
         if (Cancelled) {
-            beammp_lua_warn("'" + Result->Function + "' in '" + Result->StateId + "' failed to execute in time and was not waited for. It may still finish executing at a later time.");
+            beammp_lua_warn("'" + Snapshot.Function + "' in '" + Snapshot.StateId + "' failed to execute in time and was not waited for. It may still finish executing at a later time.");
             LuaAPI::MP::Engine->ReportErrors({ Result });
-        } else if (Result->Error) {
-            if (Result->ErrorMessage != BeamMPFnNotFoundError) {
-                beammp_lua_error(Result->Function + ": " + Result->ErrorMessage);
+        } else if (Snapshot.Error) {
+            if (Snapshot.ErrorMessage != BeamMPFnNotFoundError) {
+                beammp_lua_error(Snapshot.Function + ": " + Snapshot.ErrorMessage);
             }
         }
     }
@@ -431,10 +442,11 @@ void TLuaEngine::EnsureStateExists(TLuaStateId StateId, const std::string& Name,
         mLuaStates[StateId] = std::move(DataPtr);
         RegisterEvent("onInit", StateId, "onInit");
         if (!DontCallOnInit) {
-            auto Res = EnqueueFunctionCall(StateId, "onInit", {}, "onInit");
+            auto Res = EnqueueFunctionCall(StateId, "onInit", { }, "onInit");
             Res->WaitUntilReady();
-            if (Res->Error && Res->ErrorMessage != TLuaEngine::BeamMPFnNotFoundError) {
-                beammp_lua_error("Calling \"onInit\" on \"" + StateId + "\" failed: " + Res->ErrorMessage);
+            auto Snapshot = Res->GetSnapshot(StateId);
+            if (Snapshot.Error && Snapshot.ErrorMessage != TLuaEngine::BeamMPFnNotFoundError) {
+                beammp_lua_error("Calling \"onInit\" on \"" + StateId + "\" failed: " + Snapshot.ErrorMessage);
             }
         }
     }
@@ -446,6 +458,7 @@ void TLuaEngine::RegisterEvent(const std::string& EventName, TLuaStateId StateId
 }
 
 std::set<std::string> TLuaEngine::GetEventHandlersForState(const std::string& EventName, TLuaStateId StateId) {
+    std::unique_lock Lock(mLuaEventsMutex);
     return mLuaEvents[EventName][StateId];
 }
 
@@ -495,15 +508,12 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
         auto Fn = mStateView[Handler];
         if (Fn.valid()) {
             auto LuaResult = Fn(LocalArgs);
-            auto Result = std::make_shared<TLuaResult>();
+            auto Result = std::make_shared<TLuaResult>(mStateId, Handler);
             if (LuaResult.valid()) {
-                Result->Error = false;
-                Result->Result = LuaResult;
+                Result->MarkReadySuccess(LuaResult);
             } else {
-                Result->Error = true;
-                Result->ErrorMessage = "Function result in TriggerGlobalEvent was invalid";
+                Result->MarkReadyError("Function result in TriggerGlobalEvent was invalid");
             }
-            Result->MarkAsReady();
             Return.push_back(Result);
         }
     }
@@ -511,26 +521,55 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
     sol::table AsyncEventReturn = StateView.create_table();
     AsyncEventReturn["ReturnValueImpl"] = Return;
     AsyncEventReturn.set_function("IsDone",
-        [&](const sol::table& Self) -> bool {
+        [](const sol::table& Self) -> bool {
             auto Vector = Self.get<std::vector<std::shared_ptr<TLuaResult>>>("ReturnValueImpl");
             for (const auto& Value : Vector) {
-                if (!Value->Ready) {
+                if (!Value->IsReady()) {
                     return false;
                 }
             }
             return true;
         });
+    TLuaStateId StateId = mStateId;
     AsyncEventReturn.set_function("GetResults",
-        [&](const sol::table& Self) -> sol::table {
-            sol::state_view StateView(mState);
+        [StateId](const sol::table& Self, sol::this_state State) -> sol::table {
+            sol::state_view StateView(State);
             sol::table Result = StateView.create_table();
             auto Vector = Self.get<std::vector<std::shared_ptr<TLuaResult>>>("ReturnValueImpl");
             int i = 1;
             for (const auto& Value : Vector) {
-                if (!Value->Ready) {
+                if (!Value->IsReady()) {
                     return sol::lua_nil;
                 }
-                Result.set(i, Value->Result);
+                // event results from this state are valid unserialized
+                if (Value->OwnerState() == StateId) {
+                    auto Snapshot = Value->GetSnapshot(StateId);
+                    Result.set(i, Snapshot.Result);
+                } else {
+                    // event result from another state, goes through serialization boundary
+                    auto Snapshot = Value->GetDetachedSnapshot();
+                    std::visit([i, &Result](auto&& arg) {
+                        using T = std::decay_t<decltype(arg)>;
+                        if constexpr (std::is_same_v<T, std::vector<TDetachedLuaValue>>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, std::unordered_map<std::string, TDetachedLuaValue>>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, bool>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, double>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, int>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, std::string>)
+                            Result.set(i, arg);
+                        else if constexpr (std::is_same_v<T, std::monostate>)
+                            // monostate means no result value
+                            Result.set(i, sol::lua_nil_t());
+                        else
+                            static_assert(false, "non-exhaustive visitor!");
+                    }, Snapshot.Result.V);
+                }
+
                 ++i;
             }
             return Result;
@@ -588,7 +627,6 @@ std::variant<std::string, sol::nil_t> TLuaEngine::StateThreadData::Lua_GetPlayer
         return sol::nil;
     }
 }
-
 
 sol::table TLuaEngine::StateThreadData::Lua_GetPlayers() {
     sol::table Result = mStateView.create_table();
@@ -1080,13 +1118,15 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
 
 std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueScript(const TLuaChunk& Script) {
     std::unique_lock Lock(mStateExecuteQueueMutex);
-    auto Result = std::make_shared<TLuaResult>();
+    // explicitly passing empty string as there's no single function being called here
+    auto Result = std::make_shared<TLuaResult>(mStateId, std::string());
     mStateExecuteQueue.push({ Script, Result });
     return Result;
 }
 
 std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueFunctionCallFromCustomEvent(const std::string& FunctionName, const std::vector<TLuaValue>& Args, const std::string& EventName, CallStrategy Strategy) {
     // TODO: Document all this
+    std::unique_lock Lock(mStateFunctionQueueMutex);
     decltype(mStateFunctionQueue)::iterator Iter = mStateFunctionQueue.end();
     if (Strategy == CallStrategy::BestEffort) {
         Iter = std::find_if(mStateFunctionQueue.begin(), mStateFunctionQueue.end(),
@@ -1095,10 +1135,7 @@ std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueFunctionCallFrom
             });
     }
     if (Iter == mStateFunctionQueue.end()) {
-        auto Result = std::make_shared<TLuaResult>();
-        Result->StateId = mStateId;
-        Result->Function = FunctionName;
-        std::unique_lock Lock(mStateFunctionQueueMutex);
+        auto Result = std::make_shared<TLuaResult>(mStateId, FunctionName);
         mStateFunctionQueue.push_back({ FunctionName, Result, Args, EventName });
         mStateFunctionQueueCond.notify_all();
         return Result;
@@ -1108,9 +1145,7 @@ std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueFunctionCallFrom
 }
 
 std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueFunctionCall(const std::string& FunctionName, const std::vector<TLuaValue>& Args, const std::string& EventName) {
-    auto Result = std::make_shared<TLuaResult>();
-    Result->StateId = mStateId;
-    Result->Function = FunctionName;
+    auto Result = std::make_shared<TLuaResult>(mStateId, FunctionName);
     std::unique_lock Lock(mStateFunctionQueueMutex);
     mStateFunctionQueue.push_back({ FunctionName, Result, Args, EventName });
     mStateFunctionQueueCond.notify_all();
@@ -1159,13 +1194,10 @@ void TLuaEngine::StateThreadData::operator()() {
                 sol::state_view StateView(mState);
                 auto Res = StateView.safe_script(*S.first.Content, sol::script_pass_on_error, S.first.FileName);
                 if (Res.valid()) {
-                    S.second->Error = false;
-                    S.second->Result = std::move(Res);
+                    S.second->MarkReadySuccess(std::move(Res));
                 } else {
-                    S.second->Error = true;
-                    S.second->SetErrorMessageFromResult(Res);
+                    S.second->MarkReadyError(std::move(Res));
                 }
-                S.second->MarkAsReady();
             }
         }
         { // StateFunctionQueue Scope
@@ -1182,7 +1214,7 @@ void TLuaEngine::StateThreadData::operator()() {
                 auto& Result = TheQueuedFunction.Result;
                 auto Args = TheQueuedFunction.Args;
                 // TODO: Use TheQueuedFunction.EventName for errors, warnings, etc
-                Result->StateId = mStateId;
+                Result->SetOwnerState(mStateId);
                 sol::state_view StateView(mState);
                 auto Fn = StateView[FnName];
                 if (Fn.valid() && Fn.get_type() == sol::type::function) {
@@ -1222,17 +1254,12 @@ void TLuaEngine::StateThreadData::operator()() {
                     }
                     auto Res = Fn(sol::as_args(LuaArgs));
                     if (Res.valid()) {
-                        Result->Error = false;
-                        Result->Result = std::move(Res);
+                        Result->MarkReadySuccess(std::move(Res));
                     } else {
-                        Result->Error = true;
-                        Result->SetErrorMessageFromResult(Res);
+                        Result->MarkReadyError(std::move(Res));
                     }
-                    Result->MarkAsReady();
                 } else {
-                    Result->Error = true;
-                    Result->ErrorMessage = BeamMPFnNotFoundError; // special error kind that we can ignore later
-                    Result->MarkAsReady();
+                    Result->MarkReadyError(BeamMPFnNotFoundError);
                 }
                 auto ProfEnd = prof::now();
                 auto ProfDuration = prof::duration(ProfStart, ProfEnd);
@@ -1283,21 +1310,6 @@ void TLuaEngine::CancelEventTimers(const std::string& EventName, TLuaStateId Sta
 void TLuaEngine::StateThreadData::AddPath(const fs::path& Path) {
     std::unique_lock Lock(mPathsMutex);
     mPaths.push(Path);
-}
-
-void TLuaResult::MarkAsReady() {
-    {
-        std::lock_guard<std::mutex> readyLock(*this->ReadyMutex);
-        this->Ready = true;
-    }
-    this->ReadyCondition->notify_all();
-}
-
-void TLuaResult::WaitUntilReady() {
-    std::unique_lock readyLock(*this->ReadyMutex);
-    // wait if not ready yet
-    if (!this->Ready)
-        this->ReadyCondition->wait(readyLock);
 }
 
 TLuaChunk::TLuaChunk(std::shared_ptr<std::string> Content, std::string FileName, std::string PluginPath)

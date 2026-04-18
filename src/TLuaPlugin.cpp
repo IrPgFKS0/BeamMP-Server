@@ -63,8 +63,9 @@ TLuaPlugin::TLuaPlugin(TLuaEngine& Engine, const TLuaPluginConfig& Config, const
     }
     for (auto& Result : ResultsToCheck) {
         Result.second->WaitUntilReady();
-        if (Result.second->Error) {
-            beammp_lua_error("Failed: \"" + Result.first.string() + "\": " + Result.second->ErrorMessage);
+        auto Snapshot = Result.second->GetDetachedSnapshot();
+        if (Snapshot.Error) {
+            beammp_lua_error("Failed: \"" + Result.first.string() + "\": " + Snapshot.ErrorMessage);
         }
     }
 }

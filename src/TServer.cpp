@@ -265,9 +265,15 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         LogChatMessage(LockedClient->GetName(), LockedClient->GetID(), PacketAsString.substr(PacketAsString.find(':', 3) + 1));
         bool Rejected = std::any_of(Futures.begin(), Futures.end(),
             [](const std::shared_ptr<TLuaResult>& Elem) {
-                return !Elem->Error
-                    && Elem->Result.is<int>()
-                    && bool(Elem->Result.as<int>());
+                auto Snapshot = Elem->GetDetachedSnapshot();
+                if (Snapshot.Error) {
+                    return false;
+                }
+                const int* MaybeInt = std::get_if<int>(&Snapshot.Result.V);
+                if (MaybeInt == nullptr) {
+                    return false;
+                }
+                return bool(*MaybeInt);
             });
         if (!Rejected) {
             std::string SanitizedPacket = fmt::format("C:{}: {}", LockedClient->GetName(), Message);
@@ -380,7 +386,15 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
             TLuaEngine::WaitForAll(Futures);
             bool ShouldntSpawn = std::any_of(Futures.begin(), Futures.end(),
                 [](const std::shared_ptr<TLuaResult>& Result) {
-                    return !Result->Error && Result->Result.is<int>() && Result->Result.as<int>() != 0;
+                    auto Snapshot = Result->GetDetachedSnapshot();
+                    if (Snapshot.Error) {
+                        return false;
+                    }
+                    const int* MaybeInt = std::get_if<int>(&Snapshot.Result.V);
+                    if (MaybeInt == nullptr) {
+                        return false;
+                    }
+                    return *MaybeInt != 0;
                 });
 
             bool SpawnConfirmed = false;
@@ -417,7 +431,15 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
             TLuaEngine::WaitForAll(Futures);
             bool ShouldntAllow = std::any_of(Futures.begin(), Futures.end(),
                 [](const std::shared_ptr<TLuaResult>& Result) {
-                    return !Result->Error && Result->Result.is<int>() && Result->Result.as<int>() != 0;
+                    auto Snapshot = Result->GetDetachedSnapshot();
+                    if (Snapshot.Error) {
+                        return false;
+                    }
+                    const int* MaybeInt = std::get_if<int>(&Snapshot.Result.V);
+                    if (MaybeInt == nullptr) {
+                        return false;
+                    }
+                    return *MaybeInt != 0;
                 });
 
             auto FoundPos = Packet.find('{');

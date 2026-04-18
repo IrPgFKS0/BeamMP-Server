@@ -31,6 +31,7 @@
 #include <sstream>
 #include <thread>
 
+#include "TLuaResult.h"
 #include "Compat.h"
 #include "CustomAssert.h"
 #include "Http.h"
@@ -372,6 +373,44 @@ std::string GetPlatformAgnosticErrorString() {
 #else
     return "(no human-readable errors on this platform)";
 #endif
+}
+std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
+
+    std::visit([&os](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::vector<TDetachedLuaValue>>) {
+            size_t i = 0;
+            for (auto val : arg) {
+                if (i > 0) {
+                    os << ", ";
+                }
+                os << val;
+            }
+        } else if constexpr (std::is_same_v<T, std::unordered_map<std::string, TDetachedLuaValue>>) {
+            size_t i = 0;
+            for (auto [key, val] : arg) {
+                if (i > 0) {
+                    os << ", ";
+                }
+                os << key << "=" << val;
+            }
+        } else if constexpr (std::is_same_v<T, bool>)
+            os << (arg ? "true" : "false");
+        else if constexpr (std::is_same_v<T, double>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, int>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, std::string>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, std::monostate>)
+            // monostate means no result value
+            os << "";
+        else
+            static_assert(false, "non-exhaustive visitor!");
+    },
+        value.V);
+
+    return os;
 }
 
 // TODO: add unit tests to SplitString

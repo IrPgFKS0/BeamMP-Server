@@ -40,6 +40,7 @@
 #include <memory>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <variant>
 #include <zlib.h>
 
 typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO> rcv_timeout_option;
@@ -507,23 +508,31 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     bool BypassLimit = false;
 
     for (const auto& Result : Futures) {
-        if (!Result->Error && Result->Result.is<int>()) {
-            auto Res = Result->Result.as<int>();
+        auto Snapshot = Result->GetDetachedSnapshot();
+        if (!Snapshot.Error) {
+            const int* MaybeInt = std::get_if<int>(&Snapshot.Result.V);
+            if (MaybeInt != nullptr) {
+                auto Res = *MaybeInt;
 
-            if (Res == 1) {
-                NotAllowed = true;
-                break;
-            } else if (Res == 2) {
-                BypassLimit = true;
+                if (Res == 1) {
+                    NotAllowed = true;
+                    break;
+                } else if (Res == 2) {
+                    BypassLimit = true;
+                }
             }
         }
     }
     std::string Reason;
     bool NotAllowedWithReason = std::any_of(Futures.begin(), Futures.end(),
         [&Reason](const std::shared_ptr<TLuaResult>& Result) -> bool {
-            if (!Result->Error && Result->Result.is<std::string>()) {
-                Reason = Result->Result.as<std::string>();
-                return true;
+            auto Snapshot = Result->GetDetachedSnapshot();
+            if (!Snapshot.Error) {
+                const std::string* MaybeStr = std::get_if<std::string>(&Snapshot.Result.V);
+                if (MaybeStr != nullptr) {
+                    Reason = *MaybeStr;
+                    return true;
+                }
             }
             return false;
         });

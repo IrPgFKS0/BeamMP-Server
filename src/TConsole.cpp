@@ -22,9 +22,9 @@
 
 #include "Client.h"
 #include "CustomAssert.h"
+#include "Http.h"
 #include "LuaAPI.h"
 #include "TLuaEngine.h"
-#include "Http.h"
 
 #include <ctime>
 #include <lua.hpp>
@@ -689,9 +689,13 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
 void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
     auto FutureIsNonNil =
         [](const std::shared_ptr<TLuaResult>& Future) {
-            if (!Future->Error && Future->Result.valid()) {
-                auto Type = Future->Result.get_type();
-                return Type != sol::type::lua_nil && Type != sol::type::none;
+            if (!Future->IsError()) {
+                auto Snapshot = Future->GetDetachedSnapshot();
+                if (Snapshot.Result.V.valueless_by_exception() || std::get_if<std::monostate>(&Snapshot.Result.V) != nullptr) {
+                    // no value contained
+                    return false;
+                }
+                return true;
             }
             return false;
         };
@@ -701,7 +705,7 @@ void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
         TLuaEngine::WaitForAll(Futures, std::chrono::seconds(5));
         size_t Count = 0;
         for (auto& Future : Futures) {
-            if (!Future->Error) {
+            if (!Future->IsError()) {
                 ++Count;
             }
         }
@@ -719,14 +723,16 @@ void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
         std::stringstream Reply;
         if (NonNilFutures.size() > 1) {
             for (size_t i = 0; i < NonNilFutures.size(); ++i) {
-                Reply << NonNilFutures[i]->StateId << ": \n"
-                      << LuaAPI::LuaToString(NonNilFutures[i]->Result);
+                auto Snapshot = NonNilFutures[i]->GetDetachedSnapshot();
+                Reply << Snapshot.StateId << ": \n"
+                      << Snapshot.Result;
                 if (i < NonNilFutures.size() - 1) {
                     Reply << "\n";
                 }
             }
         } else {
-            Reply << LuaAPI::LuaToString(NonNilFutures[0]->Result);
+            auto Snapshot = NonNilFutures[0]->GetDetachedSnapshot();
+            Reply << Snapshot.Result;
         }
         Application::Console().WriteRaw(Reply.str());
     }
@@ -807,8 +813,9 @@ void TConsole::InitializeCommandline() {
                 } else {
                     auto Future = mLuaEngine->EnqueueScript(mStateId, { std::make_shared<std::string>(TrimmedCmd), "", "" });
                     Future->WaitUntilReady();
-                    if (Future->Error) {
-                        beammp_lua_error("error in " + mStateId + ": " + Future->ErrorMessage);
+                    if (Future->IsError()) {
+                        auto Snapshot = Future->GetDetachedSnapshot();
+                        beammp_lua_error("error in " + mStateId + ": " + Snapshot.ErrorMessage);
                     }
                 }
             } else {
