@@ -15,6 +15,7 @@ void TLuaResult::MarkReadySuccess(sol::object Res) {
 
 void TLuaResult::MarkReadyError(sol::protected_function_result Res) {
     std::unique_lock Lock(mMutex);
+    mError = true;
     SetErrorMessageFromResult(Res);
 
     MarkAsReady();

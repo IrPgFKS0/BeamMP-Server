@@ -510,7 +510,11 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
             auto LuaResult = Fn(LocalArgs);
             auto Result = std::make_shared<TLuaResult>(mStateId, Handler);
             if (LuaResult.valid()) {
-                Result->MarkReadySuccess(LuaResult);
+                try {
+                    Result->MarkReadySuccess(LuaResult);
+                } catch (const std::exception& e) {
+                    Result->MarkReadyError(fmt::format("Call was successful, but result could not be serialized"));
+                }
             } else {
                 Result->MarkReadyError("Function result in TriggerGlobalEvent was invalid");
             }
@@ -1194,7 +1198,11 @@ void TLuaEngine::StateThreadData::operator()() {
                 sol::state_view StateView(mState);
                 auto Res = StateView.safe_script(*S.first.Content, sol::script_pass_on_error, S.first.FileName);
                 if (Res.valid()) {
-                    S.second->MarkReadySuccess(std::move(Res));
+                    try {
+                        S.second->MarkReadySuccess(std::move(Res));
+                    } catch (const std::exception& e) {
+                        S.second->MarkReadyError(fmt::format("Call was successful, but result could not be serialized"));
+                    }
                 } else {
                     S.second->MarkReadyError(std::move(Res));
                 }
@@ -1254,7 +1262,11 @@ void TLuaEngine::StateThreadData::operator()() {
                     }
                     auto Res = Fn(sol::as_args(LuaArgs));
                     if (Res.valid()) {
-                        Result->MarkReadySuccess(std::move(Res));
+                        try {
+                            Result->MarkReadySuccess(std::move(Res));
+                        } catch (const std::exception& e) {
+                            Result->MarkReadyError(fmt::format("Call was successful, but result could not be serialized"));
+                        }
                     } else {
                         Result->MarkReadyError(std::move(Res));
                     }
