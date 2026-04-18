@@ -135,8 +135,13 @@ void TLuaEngine::operator()() {
                 }
             }
         }
-        std::unique_lock Lock(mLuaStatesMutex);
-        if (mLuaStates.empty()) {
+        bool StatesEmpty = false;
+        {
+            std::unique_lock Lock(mLuaStatesMutex);
+            StatesEmpty = mLuaStates.empty();
+        }
+
+        if (StatesEmpty) {
             beammp_trace("No Lua states, event loop running extremely sparsely");
             Application::SleepSafeSeconds(10);
         } else {
