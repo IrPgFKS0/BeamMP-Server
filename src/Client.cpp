@@ -178,8 +178,7 @@ std::optional<std::weak_ptr<TClient>> GetClient(TServer& Server, int ID) {
     std::optional<std::weak_ptr<TClient>> MaybeClient { std::nullopt };
     Server.ForEachClient([&](std::weak_ptr<TClient> CPtr) -> bool {
         ReadLock Lock(Server.GetClientMutex());
-        if (!CPtr.expired()) {
-            auto C = CPtr.lock();
+        if (auto C = CPtr.lock()) {
             if (C->GetID() == ID) {
                 MaybeClient = CPtr;
                 return false;

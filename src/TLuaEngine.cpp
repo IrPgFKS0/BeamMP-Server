@@ -120,7 +120,7 @@ void TLuaEngine::operator()() {
                     std::unique_lock StateLock(mLuaStatesMutex);
                     std::unique_lock Lock2(mResultsToCheckMutex);
                     for (auto& Handler : Handlers) {
-                        auto Res = mLuaStates[Timer.StateId]->EnqueueFunctionCallFromCustomEvent(Handler, {}, Timer.EventName, Timer.Strategy);
+                        auto Res = mLuaStates[Timer.StateId]->EnqueueFunctionCallFromCustomEvent(Handler, { }, Timer.EventName, Timer.Strategy);
                         if (Res) {
                             mResultsToCheck.push_back(Res);
                             mResultsToCheckCond.notify_one();
@@ -268,7 +268,7 @@ std::vector<std::string> TLuaEngine::StateThreadData::GetStateTableKeys(const st
     auto globals = mStateView.globals();
 
     sol::table current = globals;
-    std::vector<std::string> Result {};
+    std::vector<std::string> Result { };
 
     for (const auto& [key, value] : current) {
         std::string s = key.as<std::string>();
@@ -471,7 +471,7 @@ std::vector<sol::object> TLuaEngine::StateThreadData::JsonStringToArray(JsonStri
     auto LocalTable = Lua_JsonDecode(Str.value).as<std::vector<sol::object>>();
     for (auto& value : LocalTable) {
         if (value.is<std::string>() && value.as<std::string>() == BEAMMP_INTERNAL_NIL) {
-            value = sol::object {};
+            value = sol::object { };
         }
     }
     return LocalTable;
@@ -613,36 +613,37 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerLocalEvent(const std::string&
 
 sol::table TLuaEngine::StateThreadData::Lua_GetPlayerIdentifiers(int ID) {
     auto MaybeClient = GetClient(mEngine->Server(), ID);
-    if (MaybeClient && !MaybeClient.value().expired()) {
-        auto IDs = MaybeClient.value().lock()->GetIdentifiers();
-        if (IDs.empty()) {
-            return sol::lua_nil;
+    if (MaybeClient) {
+        if (std::shared_ptr<TClient> Locked = MaybeClient.value().lock()) {
+            auto IDs = Locked->GetIdentifiers();
+            if (IDs.empty()) {
+                return sol::lua_nil;
+            }
+            sol::table Result = mStateView.create_table();
+            for (const auto& Pair : IDs) {
+                Result.set(Pair.first, Pair.second);
+            }
+            return Result;
         }
-        sol::table Result = mStateView.create_table();
-        for (const auto& Pair : IDs) {
-            Result.set(Pair.first, Pair.second);
-        }
-        return Result;
-    } else {
-        return sol::lua_nil;
     }
+    return sol::lua_nil;
 }
 
 std::variant<std::string, sol::nil_t> TLuaEngine::StateThreadData::Lua_GetPlayerRole(int ID) {
     auto MaybeClient = GetClient(mEngine->Server(), ID);
     if (MaybeClient) {
-        return MaybeClient.value().lock()->GetRoles();
-    } else {
-        return sol::nil;
+        if (auto Locked = MaybeClient.value().lock()) {
+            return Locked->GetRoles();
+        }
     }
+    return sol::nil;
 }
 
 sol::table TLuaEngine::StateThreadData::Lua_GetPlayers() {
     sol::table Result = mStateView.create_table();
     mEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto locked = Client.lock();
-            Result[locked->GetID()] = locked->GetName();
+        if (auto Locked = Client.lock()) {
+            Result[Locked->GetID()] = Locked->GetName();
         }
         return true;
     });
@@ -652,10 +653,9 @@ sol::table TLuaEngine::StateThreadData::Lua_GetPlayers() {
 int TLuaEngine::StateThreadData::Lua_GetPlayerIDByName(const std::string& Name) {
     int Id = -1;
     mEngine->mServer->ForEachClient([&Id, &Name](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto locked = Client.lock();
-            if (locked->GetName() == Name) {
-                Id = locked->GetID();
+        if (auto Locked = Client.lock()) {
+            if (Locked->GetName() == Name) {
+                Id = Locked->GetID();
                 return false;
             }
         }
@@ -692,60 +692,59 @@ sol::table TLuaEngine::StateThreadData::Lua_FS_ListDirectories(const std::string
 
 std::string TLuaEngine::StateThreadData::Lua_GetPlayerName(int ID) {
     auto MaybeClient = GetClient(mEngine->Server(), ID);
-    if (MaybeClient && !MaybeClient.value().expired()) {
-        return MaybeClient.value().lock()->GetName();
-    } else {
-        return "";
+    if (MaybeClient) {
+        if (auto Locked = MaybeClient.value().lock()) {
+            return Locked->GetName();
+        }
     }
+    return "";
 }
 
 sol::table TLuaEngine::StateThreadData::Lua_GetPlayerVehicles(int ID) {
     auto MaybeClient = GetClient(mEngine->Server(), ID);
-    if (MaybeClient && !MaybeClient.value().expired()) {
-        auto Client = MaybeClient.value().lock();
-        TClient::TSetOfVehicleData VehicleData;
-        { // Vehicle Data Lock Scope
-            auto LockedData = Client->GetAllCars();
-            VehicleData = *LockedData.VehicleData;
-        } // End Vehicle Data Lock Scope
-        if (VehicleData.empty()) {
-            return sol::lua_nil;
+    if (MaybeClient) {
+        if (auto Client = MaybeClient.value().lock()) {
+            TClient::TSetOfVehicleData VehicleData;
+            { // Vehicle Data Lock Scope
+                auto LockedData = Client->GetAllCars();
+                VehicleData = *LockedData.VehicleData;
+            } // End Vehicle Data Lock Scope
+            if (VehicleData.empty()) {
+                return sol::lua_nil;
+            }
+            sol::state_view StateView(mState);
+            sol::table Result = StateView.create_table();
+            for (const auto& v : VehicleData) {
+                Result[v.ID()] = v.DataAsPacket(Client->GetRoles(), Client->GetName(), Client->GetID()).substr(3);
+            }
+            return Result;
         }
-        sol::state_view StateView(mState);
-        sol::table Result = StateView.create_table();
-        for (const auto& v : VehicleData) {
-            Result[v.ID()] = v.DataAsPacket(Client->GetRoles(), Client->GetName(), Client->GetID()).substr(3);
-        }
-        return Result;
-    } else
-        return sol::lua_nil;
+    }
+    return sol::lua_nil;
 }
 
 std::pair<sol::table, std::string> TLuaEngine::StateThreadData::Lua_GetPositionRaw(int PID, int VID) {
     std::pair<sol::table, std::string> Result;
     auto MaybeClient = GetClient(mEngine->Server(), PID);
-    if (MaybeClient && !MaybeClient.value().expired()) {
-        auto Client = MaybeClient.value().lock();
-        std::string VehiclePos = Client->GetCarPositionRaw(VID);
+    if (MaybeClient) {
+        if (auto Client = MaybeClient.value().lock()) {
+            std::string VehiclePos = Client->GetCarPositionRaw(VID);
 
-        if (VehiclePos.empty()) {
-            // return std::make_tuple(sol::lua_nil, sol::make_object(StateView, "Vehicle not found"));
-            Result.second = "Vehicle not found";
+            if (VehiclePos.empty()) {
+                Result.second = "Vehicle not found";
+                return Result;
+            }
+
+            sol::table t = Lua_JsonDecode(VehiclePos);
+            if (t == sol::lua_nil) {
+                Result.second = "Packet decode failed";
+            }
+            Result.first = t;
             return Result;
         }
-
-        sol::table t = Lua_JsonDecode(VehiclePos);
-        if (t == sol::lua_nil) {
-            Result.second = "Packet decode failed";
-        }
-        // return std::make_tuple(Result, sol::make_object(StateView, sol::lua_nil));
-        Result.first = t;
-        return Result;
-    } else {
-        // return std::make_tuple(sol::lua_nil, sol::make_object(StateView, "Client expired"));
-        Result.second = "No such player";
-        return Result;
     }
+    Result.second = "No such player";
+    return Result;
 }
 
 sol::table TLuaEngine::StateThreadData::Lua_HttpCreateConnection(const std::string& host, uint16_t port) {
@@ -786,22 +785,31 @@ static bool mDisableMPSet = [] {
 
 static auto GetSettingName = [](int id) -> const char* {
     switch (id) {
-        case 0: return "Debug";
-        case 1: return "Private";
-        case 2: return "MaxCars";
-        case 3: return "MaxPlayers";
-        case 4: return "Map";
-        case 5: return "Name";
-        case 6: return "Description";
-        case 7: return "InformationPacket";
-        default: return "Unknown";
+    case 0:
+        return "Debug";
+    case 1:
+        return "Private";
+    case 2:
+        return "MaxCars";
+    case 3:
+        return "MaxPlayers";
+    case 4:
+        return "Map";
+    case 5:
+        return "Name";
+    case 6:
+        return "Description";
+    case 7:
+        return "InformationPacket";
+    default:
+        return "Unknown";
     }
 };
 
 static void JsonDecodeRecursive(sol::state_view& StateView, sol::table& table, const std::string& left, const nlohmann::json& right) {
     switch (right.type()) {
     case nlohmann::detail::value_t::null:
-        AddToTable(table, left, sol::lua_nil_t {});
+        AddToTable(table, left, sol::lua_nil_t { });
         return;
     case nlohmann::detail::value_t::object: {
         auto value = table.create();
@@ -949,12 +957,9 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
             beammp_lua_error("SendNotification expects 2, 3 or 4 arguments.");
         }
     });
-    MPTable.set_function("ConfirmationDialog", sol::overload(
-        &LuaAPI::MP::ConfirmationDialog,
-        [&](const int& ID, const std::string& Title, const std::string& Body, const sol::table& Buttons, const std::string& InteractionID) {
-            LuaAPI::MP::ConfirmationDialog(ID, Title, Body, Buttons, InteractionID);
-        }
-    ));
+    MPTable.set_function("ConfirmationDialog", sol::overload(&LuaAPI::MP::ConfirmationDialog, [&](const int& ID, const std::string& Title, const std::string& Body, const sol::table& Buttons, const std::string& InteractionID) {
+        LuaAPI::MP::ConfirmationDialog(ID, Title, Body, Buttons, InteractionID);
+    }));
     MPTable.set_function("GetPlayers", [&]() -> sol::table {
         return Lua_GetPlayers();
     });

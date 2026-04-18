@@ -296,8 +296,7 @@ void TConsole::Command_NetTest(const std::string& cmd, const std::vector<std::st
     unsigned int status = 0;
 
     std::string T = Http::GET(
-    Application::GetServerCheckUrl() + "/api/v2/beammp/" + std::to_string(Application::Settings.getAsInt(Settings::Key::General_Port)), &status
-        );
+        Application::GetServerCheckUrl() + "/api/v2/beammp/" + std::to_string(Application::Settings.getAsInt(Settings::Key::General_Port)), &status);
 
     beammp_debugf("Status and response from Server Check API: {0}, {1}", status, T);
 
@@ -334,10 +333,9 @@ void TConsole::Command_Kick(const std::string&, const std::vector<std::string>& 
         return StringStartsWith(Name1, Name2) || StringStartsWith(Name2, Name1);
     };
     mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto locked = Client.lock();
-            if (NameCompare(locked->GetName(), Name)) {
-                mLuaEngine->Network().ClientKick(*locked, Reason);
+        if (auto Locked = Client.lock()) {
+            if (NameCompare(Locked->GetName(), Name)) {
+                mLuaEngine->Network().ClientKick(*Locked, Reason);
                 Kicked = true;
                 return false;
             }
@@ -356,7 +354,7 @@ std::tuple<std::string, std::vector<std::string>> TConsole::ParseCommand(const s
     // It correctly splits arguments, including respecting single and double quotes, as well as backticks
     auto End_i = CommandWithArgs.find_first_of(' ');
     std::string Command = CommandWithArgs.substr(0, End_i);
-    std::string ArgsStr {};
+    std::string ArgsStr { };
     if (End_i != std::string::npos) {
         ArgsStr = CommandWithArgs.substr(End_i);
     }
@@ -566,11 +564,10 @@ void TConsole::Command_List(const std::string&, const std::vector<std::string>& 
         std::stringstream ss;
         ss << std::left << std::setw(25) << "Name" << std::setw(6) << "ID" << std::setw(6) << "Cars" << std::endl;
         mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-            if (!Client.expired()) {
-                auto locked = Client.lock();
-                ss << std::left << std::setw(25) << locked->GetName()
-                   << std::setw(6) << locked->GetID()
-                   << std::setw(6) << locked->GetCarCount() << "\n";
+            if (auto Locked = Client.lock()) {
+                ss << std::left << std::setw(25) << Locked->GetName()
+                   << std::setw(6) << Locked->GetID()
+                   << std::setw(6) << Locked->GetCarCount() << "\n";
             }
             return true;
         });
@@ -593,8 +590,7 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
     size_t MissedPacketQueueSum = 0;
     int LargestSecondsSinceLastPing = 0;
     mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto Locked = Client.lock();
+        if (auto Locked = Client.lock()) {
             CarCount += Locked->GetCarCount();
             ConnectedCount += Locked->IsUDPConnected() ? 1 : 0;
             GuestCount += Locked->IsGuest() ? 1 : 0;
@@ -613,11 +609,11 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
     size_t SystemsBad = 0;
     size_t SystemsShuttingDown = 0;
     size_t SystemsShutdown = 0;
-    std::string SystemsBadList {};
-    std::string SystemsGoodList {};
-    std::string SystemsStartingList {};
-    std::string SystemsShuttingDownList {};
-    std::string SystemsShutdownList {};
+    std::string SystemsBadList { };
+    std::string SystemsGoodList { };
+    std::string SystemsStartingList { };
+    std::string SystemsShuttingDownList { };
+    std::string SystemsShutdownList { };
     auto Statuses = Application::GetSubsystemStatuses();
     for (const auto& NameStatusPair : Statuses) {
         switch (NameStatusPair.second) {
@@ -847,7 +843,7 @@ void TConsole::InitializeCommandline() {
                 if (!mLuaEngine) {
                     beammp_info("Lua not started yet, please try again in a second");
                 } else {
-                    std::string prefix {}; // stores non-table part of input
+                    std::string prefix { }; // stores non-table part of input
                     for (size_t i = stub.length(); i > 0; i--) { // separate table from input
                         if (!std::isalnum(stub[i - 1]) && stub[i - 1] != '_' && stub[i - 1] != '.') {
                             prefix = stub.substr(0, i);

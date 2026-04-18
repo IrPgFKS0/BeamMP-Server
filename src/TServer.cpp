@@ -127,19 +127,15 @@ TServer::TServer(const std::vector<std::string_view>& Arguments) {
 }
 
 void TServer::RemoveClient(const std::weak_ptr<TClient>& WeakClientPtr) {
-    std::shared_ptr<TClient> LockedClientPtr { nullptr };
-    try {
-        LockedClientPtr = WeakClientPtr.lock();
-    } catch (const std::exception&) {
-        // silently fail, as there's nothing to do
+    auto LockedClientPtr = WeakClientPtr.lock();
+    if (!LockedClientPtr) {
         return;
     }
-    beammp_assert(LockedClientPtr != nullptr);
     TClient& Client = *LockedClientPtr;
     beammp_debug("removing client " + Client.GetName() + " (" + std::to_string(ClientCount()) + ")");
     Client.ClearCars();
     WriteLock Lock(mClientsMutex);
-    mClients.erase(WeakClientPtr.lock());
+    mClients.erase(LockedClientPtr);
 }
 
 void TServer::ForEachClient(const std::function<bool(std::weak_ptr<TClient>)>& Fn) {
@@ -167,14 +163,16 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         try {
             Packet = DeComp(Packet);
         } catch (const InvalidDataError& ) {
-            auto LockedClient = Client.lock();
-            beammp_errorf("Failed to decompress packet from client {}. The client sent invalid data and will now be disconnected.", LockedClient->GetID());
-            Network.ClientKick(*LockedClient, "Sent invalid compressed packet (this is likely a bug on your end)");
+            if (auto LockedClient = Client.lock()) {
+                beammp_errorf("Failed to decompress packet from client {}. The client sent invalid data and will now be disconnected.", LockedClient->GetID());
+                Network.ClientKick(*LockedClient, "Sent invalid compressed packet (this is likely a bug on your end)");
+            }
             return;
         } catch (const std::runtime_error& e) {
-            auto LockedClient = Client.lock();
-            beammp_errorf("Failed to decompress packet from client {}: {}. The server might be out of RAM! The client will now be disconnected.", LockedClient->GetID(), e.what());
-            Network.ClientKick(*LockedClient, "Decompression failed (likely a server-side problem)");
+            if (auto LockedClient = Client.lock()) {
+                beammp_errorf("Failed to decompress packet from client {}: {}. The server might be out of RAM! The client will now be disconnected.", LockedClient->GetID(), e.what());
+                Network.ClientKick(*LockedClient, "Decompression failed (likely a server-side problem)");
+            }
             return;
         }
     }
@@ -182,10 +180,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         return;
     }
 
-    if (Client.expired()) {
+    auto LockedClient = Client.lock();
+    if (!LockedClient) {
         return;
     }
-    auto LockedClient = Client.lock();
 
     std::any Res;
     char Code = Packet.at(0);
