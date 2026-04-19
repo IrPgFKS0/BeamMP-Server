@@ -21,13 +21,18 @@
 #include "Common.h"
 #include <condition_variable>
 #include <string>
+#include <memory>
 #include <sol/sol.hpp>
 
 using TLuaStateId = std::string;
 
 struct TDetachedLuaValue {
+    using Ptr = std::shared_ptr<TDetachedLuaValue>;
     using Array = std::vector<TDetachedLuaValue>;
-    using Object = std::unordered_map<std::string, TDetachedLuaValue>;
+    // This weird Ptr indirection is needed because some implementations of libstc++,
+    // like the GCC 11 one shipped with ubuntu 22.04, need to know the size of the second
+    // member of the pairs that make up the elements of such a map. It's fine in vector.
+    using Object = std::unordered_map<std::string, TDetachedLuaValue::Ptr>;
     std::variant<std::monostate, bool, double, int, std::string, Array, Object> V;
 };
 std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value);

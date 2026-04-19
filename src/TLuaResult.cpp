@@ -19,8 +19,51 @@
 #include "TLuaResult.h"
 #include <atomic>
 #include <chrono>
+#include <sol/unsafe_function_result.hpp>
 #include <stdexcept>
 #include <thread>
+
+
+std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
+    std::visit([&os](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>) {
+            size_t i = 0;
+            for (const auto& val : arg) {
+                if (i > 0) {
+                    os << ", ";
+                }
+                os << val;
+                ++i;
+            }
+        } else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>) {
+            size_t i = 0;
+            for (const auto& [key, val] : arg) {
+                if (i > 0) {
+                    os << ", ";
+                }
+                os << key << "=" << val;
+                ++i;
+            }
+        } else if constexpr (std::is_same_v<T, bool>)
+            os << (arg ? "true" : "false");
+        else if constexpr (std::is_same_v<T, double>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, int>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, std::string>)
+            os << arg;
+        else if constexpr (std::is_same_v<T, std::monostate>)
+            // monostate means no result value
+            os << "";
+        else
+            static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
+    },
+        value.V);
+
+    return os;
+}
+
 
 void TLuaResult::MarkReadySuccess(sol::object Res) {
     std::unique_lock Lock(mMutex);
@@ -116,7 +159,7 @@ TDetachedLuaValue TLuaResult::Freeze(const sol::object& o, int depth) {
         for (auto&& [k, v] : o.as<sol::table>()) {
             if (!k.is<std::string>())
                 continue; // no numeric-key handling, don't need it
-            out.emplace(k.as<std::string>(), Freeze(v, depth + 1));
+            out.emplace(k.as<std::string>(), std::make_shared<TDetachedLuaValue>(std::move(Freeze(v, depth + 1))));
         }
         return { { std::move(out) } };
     }
@@ -199,18 +242,18 @@ TEST_CASE("TLuaResult detached snapshot freezes nested string-keyed tables") {
     CHECK(object->contains("inner"));
     CHECK_FALSE(object->contains("1"));
 
-    const auto* flag = std::get_if<bool>(&object->at("flag").V);
+    const auto* flag = std::get_if<bool>(&object->at("flag")->V);
     REQUIRE(flag != nullptr);
     CHECK(*flag);
 
-    const auto* msg = std::get_if<std::string>(&object->at("msg").V);
+    const auto* msg = std::get_if<std::string>(&object->at("msg")->V);
     REQUIRE(msg != nullptr);
     CHECK(*msg == "hello");
 
-    const auto* innerObj = std::get_if<TDetachedLuaValue::Object>(&object->at("inner").V);
+    const auto* innerObj = std::get_if<TDetachedLuaValue::Object>(&object->at("inner")->V);
     REQUIRE(innerObj != nullptr);
     REQUIRE(innerObj->contains("k"));
-    const auto* innerValue = std::get_if<std::string>(&innerObj->at("k").V);
+    const auto* innerValue = std::get_if<std::string>(&innerObj->at("k")->V);
     REQUIRE(innerValue != nullptr);
     CHECK(*innerValue == "v");
 }

@@ -374,46 +374,6 @@ std::string GetPlatformAgnosticErrorString() {
     return "(no human-readable errors on this platform)";
 #endif
 }
-std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
-
-    std::visit([&os](auto&& arg) {
-        using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>) {
-            size_t i = 0;
-            for (auto val : arg) {
-                if (i > 0) {
-                    os << ", ";
-                }
-                os << val;
-                ++i;
-            }
-        } else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>) {
-            size_t i = 0;
-            for (auto [key, val] : arg) {
-                if (i > 0) {
-                    os << ", ";
-                }
-                os << key << "=" << val;
-                ++i;
-            }
-        } else if constexpr (std::is_same_v<T, bool>)
-            os << (arg ? "true" : "false");
-        else if constexpr (std::is_same_v<T, double>)
-            os << arg;
-        else if constexpr (std::is_same_v<T, int>)
-            os << arg;
-        else if constexpr (std::is_same_v<T, std::string>)
-            os << arg;
-        else if constexpr (std::is_same_v<T, std::monostate>)
-            // monostate means no result value
-            os << "";
-        else
-            static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
-    },
-        value.V);
-
-    return os;
-}
 
 // TODO: add unit tests to SplitString
 void SplitString(const std::string& str, const char delim, std::vector<std::string>& out) {

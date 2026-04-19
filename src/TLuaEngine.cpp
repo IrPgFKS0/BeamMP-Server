@@ -554,9 +554,9 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
                     auto Snapshot = Value->GetDetachedSnapshot();
                     std::visit([i, &Result](auto&& arg) {
                         using T = std::decay_t<decltype(arg)>;
-                        if constexpr (std::is_same_v<T, std::vector<TDetachedLuaValue>>)
+                        if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>)
                             Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, std::unordered_map<std::string, TDetachedLuaValue>>)
+                        else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>)
                             Result.set(i, arg);
                         else if constexpr (std::is_same_v<T, bool>)
                             Result.set(i, arg);
