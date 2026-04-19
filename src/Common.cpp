@@ -385,6 +385,7 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
                     os << ", ";
                 }
                 os << val;
+                ++i;
             }
         } else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>) {
             size_t i = 0;
@@ -393,6 +394,7 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
                     os << ", ";
                 }
                 os << key << "=" << val;
+                ++i;
             }
         } else if constexpr (std::is_same_v<T, bool>)
             os << (arg ? "true" : "false");
