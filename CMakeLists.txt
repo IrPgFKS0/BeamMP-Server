@@ -8,7 +8,7 @@ include(cmake/Vcpkg.cmake) # needs to happen before project()
 
 project(
     "BeamMP-Server" # replace this
-    VERSION 3.3.0
+    VERSION 3.9.2
 )
 
 include(cmake/StandardSettings.cmake)
