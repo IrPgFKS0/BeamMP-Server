@@ -37,6 +37,7 @@
 #include <sol/types.hpp>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <variant>
 
@@ -60,12 +61,6 @@ TLuaEngine::TLuaEngine()
         Application::SetSubsystemStatus("LuaEngine", Application::Status::Shutdown);
     });
     IThreaded::Start();
-}
-
-TEST_CASE("TLuaEngine ctor & dtor") {
-    Application::Settings.set(Settings::Key::General_ResourceFolder, "beammp_server_test_resources");
-    TLuaEngine engine;
-    Application::GracefullyShutdown();
 }
 
 void TLuaEngine::operator()() {
@@ -1241,34 +1236,32 @@ void TLuaEngine::StateThreadData::operator()() {
                         if (Arg.valueless_by_exception()) {
                             continue;
                         }
-                        switch (Arg.index()) {
-                        case TLuaType::String:
-                            LuaArgs.push_back(sol::make_object(StateView, std::get<std::string>(Arg)));
-                            break;
-                        case TLuaType::Int:
-                            LuaArgs.push_back(sol::make_object(StateView, std::get<int>(Arg)));
-                            break;
-                        case TLuaType::Json: {
-                            auto LocalArgs = JsonStringToArray(std::get<JsonString>(Arg));
-                            LuaArgs.insert(LuaArgs.end(), LocalArgs.begin(), LocalArgs.end());
-                            break;
-                        }
-                        case TLuaType::Bool:
-                            LuaArgs.push_back(sol::make_object(StateView, std::get<bool>(Arg)));
-                            break;
-                        case TLuaType::StringStringMap: {
-                            auto Map = std::get<std::unordered_map<std::string, std::string>>(Arg);
-                            auto Table = StateView.create_table();
-                            for (const auto& [k, v] : Map) {
-                                Table[k] = v;
+                        std::visit([&LuaArgs, &StateView, this](const auto& arg) {
+                            using T = std::decay_t<decltype(arg)>;
+                            if constexpr (std::is_same_v<T, std::string>) {
+                                LuaArgs.push_back(sol::make_object(StateView, arg));
+                            } else if constexpr (std::is_same_v<T, int>) {
+                                LuaArgs.push_back(sol::make_object(StateView, arg));
+                            } else if constexpr (std::is_same_v<T, bool>) {
+                                LuaArgs.push_back(sol::make_object(StateView, arg));
+                            } else if constexpr (std::is_same_v<T, JsonString>) {
+                                auto LocalArgs = JsonStringToArray(arg);
+                                LuaArgs.insert(LuaArgs.end(), LocalArgs.begin(), LocalArgs.end());
+                            } else if constexpr (std::is_same_v<T, std::monostate>) {
+                                beammp_lua_error("Unknown argument type, passed as nil");
+                                LuaArgs.push_back(sol::lua_nil_t());
+                            } else if constexpr (std::is_same_v<T, std::unordered_map<std::string, std::string>>) {
+                                auto Table = StateView.create_table();
+                                for (const auto& [k, v] : arg) {
+                                    Table[k] = v;
+                                }
+                                LuaArgs.push_back(Table);
+                            } else if constexpr (std::is_same_v<T, float>) {
+                                LuaArgs.push_back(sol::make_object(StateView, arg));
+                            } else {
+                                static_assert(false, "unhandled variant");
                             }
-                            LuaArgs.push_back(sol::make_object(StateView, Table));
-                            break;
-                        }
-                        default:
-                            beammp_error("Unknown argument type, passed as nil");
-                            break;
-                        }
+                        }, Arg);
                     }
                     auto Res = Fn(sol::as_args(LuaArgs));
                     if (Res.valid()) {
@@ -1347,4 +1340,80 @@ bool TLuaEngine::TimedEvent::Expired() {
 
 void TLuaEngine::TimedEvent::Reset() {
     LastCompletion = std::chrono::high_resolution_clock::now();
+}
+
+TEST_CASE("TLuaEngine ctor & dtor") {
+    Application::Settings.set(Settings::Key::General_ResourceFolder, "beammp_server_test_resources");
+    TLuaEngine engine;
+
+    const TLuaStateId StateId = "lua_event_contract_test";
+    engine.EnsureStateExists(StateId, "LuaEventContractTest", true);
+
+    // LLM generated test code
+    auto Script = std::make_shared<std::string>(R"(
+function onPlayerAuth(playerName, playerRole, isGuest, identifiers)
+    if type(playerName) ~= "string" then return "on:bad-playerName-type:" .. type(playerName) end
+    if type(playerRole) ~= "string" then return "on:bad-playerRole-type:" .. type(playerRole) end
+    if type(isGuest) ~= "boolean" then return "on:bad-isGuest-type:" .. type(isGuest) end
+    if type(identifiers) ~= "table" then return "on:bad-identifiers-type:" .. type(identifiers) end
+    return "on:" .. playerName .. ":" .. playerRole .. ":" .. tostring(isGuest) .. ":" .. tostring(identifiers.ip) .. ":" .. tostring(identifiers.beammp)
+end
+
+function postPlayerAuth(isDenied, reason, playerName, playerRole, isGuest, identifiers)
+    if type(isDenied) ~= "boolean" then return "post:bad-isDenied-type:" .. type(isDenied) end
+    if type(reason) ~= "string" then return "post:bad-reason-type:" .. type(reason) end
+    if type(playerName) ~= "string" then return "post:bad-playerName-type:" .. type(playerName) end
+    if type(playerRole) ~= "string" then return "post:bad-playerRole-type:" .. type(playerRole) end
+    if type(isGuest) ~= "boolean" then return "post:bad-isGuest-type:" .. type(isGuest) end
+    if type(identifiers) ~= "table" then return "post:bad-identifiers-type:" .. type(identifiers) end
+    return "post:" .. tostring(isDenied) .. ":" .. reason .. ":" .. playerName .. ":" .. playerRole .. ":" .. tostring(isGuest) .. ":" .. tostring(identifiers.ip) .. ":" .. tostring(identifiers.beammp)
+end
+
+MP.RegisterEvent("onPlayerAuth", "onPlayerAuth")
+MP.RegisterEvent("postPlayerAuth", "postPlayerAuth")
+)");
+
+    auto LoadResult = engine.EnqueueScript(StateId, TLuaChunk(Script, "event_contract.lua", "beammp_server_test_resources/Server/LuaEventContractTest"));
+    LoadResult->WaitUntilReady();
+    auto LoadSnapshot = LoadResult->GetDetachedSnapshot();
+    CHECK(!LoadSnapshot.Error);
+
+    const std::unordered_map<std::string, std::string> Identifiers {
+        {"ip", "410.0.24.1"},
+        {"beammp", "123456"},
+    };
+
+    auto OnPlayerAuthResults = engine.TriggerEvent(
+        "onPlayerAuth", "",
+        std::string("guest8133569"),
+        std::string("USER"),
+        true,
+        Identifiers);
+    REQUIRE(OnPlayerAuthResults.size() == 1);
+    TLuaEngine::WaitForAll(OnPlayerAuthResults);
+
+    auto OnPlayerAuthSnapshot = OnPlayerAuthResults.front()->GetDetachedSnapshot();
+    CHECK(!OnPlayerAuthSnapshot.Error);
+    const auto* OnPlayerAuthValue = std::get_if<std::string>(&OnPlayerAuthSnapshot.Result.V);
+    REQUIRE(OnPlayerAuthValue != nullptr);
+    CHECK(*OnPlayerAuthValue == "on:guest8133569:USER:true:410.0.24.1:123456");
+
+    auto PostPlayerAuthResults = engine.TriggerEvent(
+        "postPlayerAuth", "",
+        false,
+        std::string(""),
+        std::string("guest8133569"),
+        std::string("USER"),
+        true,
+        Identifiers);
+    REQUIRE(PostPlayerAuthResults.size() == 1);
+    TLuaEngine::WaitForAll(PostPlayerAuthResults);
+
+    auto PostPlayerAuthSnapshot = PostPlayerAuthResults.front()->GetDetachedSnapshot();
+    CHECK(!PostPlayerAuthSnapshot.Error);
+    const auto* PostPlayerAuthValue = std::get_if<std::string>(&PostPlayerAuthSnapshot.Result.V);
+    REQUIRE(PostPlayerAuthValue != nullptr);
+    CHECK(*PostPlayerAuthValue == "post:false::guest8133569:USER:true:410.0.24.1:123456");
+
+    Application::GracefullyShutdown();
 }
