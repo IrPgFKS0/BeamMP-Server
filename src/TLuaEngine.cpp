@@ -570,7 +570,7 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
                             // monostate means no result value
                             Result.set(i, sol::lua_nil_t());
                         else
-                            static_assert(false, "non-exhaustive visitor!");
+                            static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
                     }, Snapshot.Result.V);
                 }
 
@@ -1259,7 +1259,7 @@ void TLuaEngine::StateThreadData::operator()() {
                             } else if constexpr (std::is_same_v<T, float>) {
                                 LuaArgs.push_back(sol::make_object(StateView, arg));
                             } else {
-                                static_assert(false, "unhandled variant");
+                                static_assert(AlwaysFalseV<T>, "unhandled variant");
                             }
                         }, Arg);
                     }

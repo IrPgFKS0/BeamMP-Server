@@ -378,7 +378,7 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
 
     std::visit([&os](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, std::vector<TDetachedLuaValue>>) {
+        if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>) {
             size_t i = 0;
             for (auto val : arg) {
                 if (i > 0) {
@@ -386,7 +386,7 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
                 }
                 os << val;
             }
-        } else if constexpr (std::is_same_v<T, std::unordered_map<std::string, TDetachedLuaValue>>) {
+        } else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>) {
             size_t i = 0;
             for (auto [key, val] : arg) {
                 if (i > 0) {
@@ -406,7 +406,7 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
             // monostate means no result value
             os << "";
         else
-            static_assert(false, "non-exhaustive visitor!");
+            static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
     },
         value.V);
 
