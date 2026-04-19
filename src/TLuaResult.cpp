@@ -163,8 +163,8 @@ TEST_CASE("TLuaResult MarkReadyError(string) marks ready and wakes waiters") {
 }
 
 TEST_CASE("TLuaResult GetSnapshot enforces owner state id") {
-    TLuaResult result("owner_state", "fn_owner");
     sol::state lua;
+    TLuaResult result("owner_state", "fn_owner");
     lua.open_libraries(sol::lib::base);
     result.MarkReadySuccess(sol::make_object(lua.lua_state(), std::string("ok")));
 
@@ -173,8 +173,8 @@ TEST_CASE("TLuaResult GetSnapshot enforces owner state id") {
 }
 
 TEST_CASE("TLuaResult detached snapshot freezes nested string-keyed tables") {
-    TLuaResult result("state_table", "fn_table");
     sol::state lua;
+    TLuaResult result("state_table", "fn_table");
     lua.open_libraries(sol::lib::base);
 
     auto outer = lua.create_table();
@@ -216,8 +216,8 @@ TEST_CASE("TLuaResult detached snapshot freezes nested string-keyed tables") {
 }
 
 TEST_CASE("TLuaResult MarkReadySuccess throws on unsupported Lua function value") {
-    TLuaResult result("state_fn", "fn_fn");
     sol::state lua;
+    TLuaResult result("state_fn", "fn_fn");
     lua.open_libraries(sol::lib::base);
     lua["f"] = [] { return 1; };
     const sol::table globals = lua.globals();
