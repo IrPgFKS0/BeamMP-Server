@@ -810,7 +810,7 @@ void TConsole::InitializeCommandline() {
                     auto Future = mLuaEngine->EnqueueScript(mStateId, { std::make_shared<std::string>(TrimmedCmd), "", "" });
                     Future->WaitUntilReady();
                     if (Future->IsError()) {
-                        auto Snapshot = Future->GetDetachedSnapshot();
+                        auto Snapshot = Future->GetSnapshot();
                         beammp_lua_error("error in " + mStateId + ": " + Snapshot.ErrorMessage);
                     }
                 }

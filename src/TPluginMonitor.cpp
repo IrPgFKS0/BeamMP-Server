@@ -70,7 +70,7 @@ void TPluginMonitor::operator()() {
                             auto Res = mEngine->EnqueueScript(StateID, Chunk);
                             Res->WaitUntilReady();
                             if (Res->IsError()) {
-                                auto Snapshot = Res->GetDetachedSnapshot();
+                                auto Snapshot = Res->GetSnapshot();
                                 beammp_lua_errorf("Error while hot-reloading \"{}\": {}", Pair.first, Snapshot.ErrorMessage);
                             } else {
                                 mEngine->ReportErrors(mEngine->TriggerLocalEvent(StateID, "onInit"));

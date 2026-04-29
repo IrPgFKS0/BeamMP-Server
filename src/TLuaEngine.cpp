@@ -209,8 +209,8 @@ std::unordered_map<std::string /* event name */, std::vector<std::string> /* han
     return Result;
 }
 
-std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaResult>>> TLuaEngine::Debug_GetStateExecuteQueueForState(TLuaStateId StateId) {
-    std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaResult>>> Result;
+std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaVoidResult>>> TLuaEngine::Debug_GetStateExecuteQueueForState(TLuaStateId StateId) {
+    std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaVoidResult>>> Result;
     std::unique_lock Lock(mLuaStatesMutex);
     Result = mLuaStates.at(StateId)->Debug_GetStateExecuteQueue();
     return Result;
@@ -362,7 +362,7 @@ bool TLuaEngine::HasState(TLuaStateId StateId) {
     return mLuaStates.find(StateId) != mLuaStates.end();
 }
 
-std::shared_ptr<TLuaResult> TLuaEngine::EnqueueScript(TLuaStateId StateID, const TLuaChunk& Script) {
+std::shared_ptr<TLuaVoidResult> TLuaEngine::EnqueueScript(TLuaStateId StateID, const TLuaChunk& Script) {
     std::unique_lock Lock(mLuaStatesMutex);
     return mLuaStates.at(StateID)->EnqueueScript(Script);
 }
@@ -444,7 +444,7 @@ void TLuaEngine::EnsureStateExists(TLuaStateId StateId, const std::string& Name,
         if (!DontCallOnInit) {
             auto Res = EnqueueFunctionCall(StateId, "onInit", { }, "onInit");
             Res->WaitUntilReady();
-            auto Snapshot = Res->GetSnapshot(StateId);
+            auto Snapshot = Res->GetDetachedSnapshot();
             if (Snapshot.Error && Snapshot.ErrorMessage != TLuaEngine::BeamMPFnNotFoundError) {
                 beammp_lua_error("Calling \"onInit\" on \"" + StateId + "\" failed: " + Snapshot.ErrorMessage);
             }
@@ -534,45 +534,50 @@ sol::table TLuaEngine::StateThreadData::Lua_TriggerGlobalEvent(const std::string
             }
             return true;
         });
-    TLuaStateId StateId = mStateId;
     AsyncEventReturn.set_function("GetResults",
-        [StateId](const sol::table& Self, sol::this_state State) -> sol::table {
+        [](const sol::table& Self, sol::this_state State) -> sol::table {
             sol::state_view StateView(State);
             sol::table Result = StateView.create_table();
             auto Vector = Self.get<std::vector<std::shared_ptr<TLuaResult>>>("ReturnValueImpl");
+            auto DetachedToLuaObject = [&StateView](const auto& SelfConvert, const TDetachedLuaValue& value) -> sol::object {
+                return std::visit([&StateView, &SelfConvert](auto&& arg) -> sol::object {
+                    using T = std::decay_t<decltype(arg)>;
+                    if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>) {
+                        sol::table Table = StateView.create_table(static_cast<int>(arg.size()), 0);
+                        size_t i = 1;
+                        for (const auto& Elem : arg) {
+                            Table.set(i, SelfConvert(SelfConvert, Elem));
+                            ++i;
+                        }
+                        return sol::make_object(StateView, Table);
+                    } else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>) {
+                        sol::table Table = StateView.create_table();
+                        for (const auto& [Key, Elem] : arg) {
+                            Table.set(Key, SelfConvert(SelfConvert, *Elem));
+                        }
+                        return sol::make_object(StateView, Table);
+                    }
+                    else if constexpr (std::is_same_v<T, bool>)
+                        return sol::make_object(StateView, arg);
+                    else if constexpr (std::is_same_v<T, double>)
+                        return sol::make_object(StateView, arg);
+                    else if constexpr (std::is_same_v<T, int>)
+                        return sol::make_object(StateView, arg);
+                    else if constexpr (std::is_same_v<T, std::string>)
+                        return sol::make_object(StateView, arg);
+                    else if constexpr (std::is_same_v<T, std::monostate>)
+                        return sol::make_object(StateView, sol::lua_nil_t());
+                    else
+                        static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
+                }, value.V);
+            };
             int i = 1;
             for (const auto& Value : Vector) {
                 if (!Value->IsReady()) {
                     return sol::lua_nil;
                 }
-                // event results from this state are valid unserialized
-                if (Value->OwnerState() == StateId) {
-                    auto Snapshot = Value->GetSnapshot(StateId);
-                    Result.set(i, Snapshot.Result);
-                } else {
-                    // event result from another state, goes through serialization boundary
-                    auto Snapshot = Value->GetDetachedSnapshot();
-                    std::visit([i, &Result](auto&& arg) {
-                        using T = std::decay_t<decltype(arg)>;
-                        if constexpr (std::is_same_v<T, TDetachedLuaValue::Array>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, TDetachedLuaValue::Object>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, bool>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, double>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, int>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, std::string>)
-                            Result.set(i, arg);
-                        else if constexpr (std::is_same_v<T, std::monostate>)
-                            // monostate means no result value
-                            Result.set(i, sol::lua_nil_t());
-                        else
-                            static_assert(AlwaysFalseV<T>, "non-exhaustive visitor!");
-                    }, Snapshot.Result.V);
-                }
+                auto Snapshot = Value->GetDetachedSnapshot();
+                Result.set(i, DetachedToLuaObject(DetachedToLuaObject, Snapshot.Result));
 
                 ++i;
             }
@@ -1125,10 +1130,9 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
     Start();
 }
 
-std::shared_ptr<TLuaResult> TLuaEngine::StateThreadData::EnqueueScript(const TLuaChunk& Script) {
+std::shared_ptr<TLuaVoidResult> TLuaEngine::StateThreadData::EnqueueScript(const TLuaChunk& Script) {
     std::unique_lock Lock(mStateExecuteQueueMutex);
-    // explicitly passing empty string as there's no single function being called here
-    auto Result = std::make_shared<TLuaResult>(mStateId, std::string());
+    auto Result = std::make_shared<TLuaVoidResult>(mStateId);
     mStateExecuteQueue.push({ Script, Result });
     return Result;
 }
@@ -1203,11 +1207,11 @@ void TLuaEngine::StateThreadData::operator()() {
                 sol::state_view StateView(mState);
                 auto Res = StateView.safe_script(*S.first.Content, sol::script_pass_on_error, S.first.FileName);
                 if (Res.valid()) {
-                    try {
-                        S.second->MarkReadySuccess(std::move(Res));
-                    } catch (const std::exception& e) {
-                        S.second->MarkReadyError(fmt::format("Call was successful, but result could not be serialized"));
-                    }
+                    // Script-load completion should not serialize the script's return value.
+                    // A loaded chunk may legally return non-serializable Lua values such as
+                    // functions or function tables. For this reason, we don't pass anything
+                    // to the result here.
+                    S.second->MarkReadySuccess();
                 } else {
                     S.second->MarkReadyError(std::move(Res));
                 }
@@ -1284,7 +1288,7 @@ void TLuaEngine::StateThreadData::operator()() {
     }
 }
 
-std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaResult>>> TLuaEngine::StateThreadData::Debug_GetStateExecuteQueue() {
+std::queue<std::pair<TLuaChunk, std::shared_ptr<TLuaVoidResult>>> TLuaEngine::StateThreadData::Debug_GetStateExecuteQueue() {
     std::unique_lock Lock(mStateExecuteQueueMutex);
     return mStateExecuteQueue;
 }
@@ -1369,13 +1373,36 @@ function postPlayerAuth(isDenied, reason, playerName, playerRole, isGuest, ident
     return "post:" .. tostring(isDenied) .. ":" .. reason .. ":" .. playerName .. ":" .. playerRole .. ":" .. tostring(isGuest) .. ":" .. tostring(identifiers.ip) .. ":" .. tostring(identifiers.beammp)
 end
 
+function arrayBoundaryHandler()
+    return { "first", "second", [4] = true }
+end
+
+function verifyArrayBoundaryRoundtrip()
+    local pending = MP.TriggerGlobalEvent("arrayBoundaryEvent")
+    if not pending:IsDone() then
+        return "not_done"
+    end
+
+    local results = pending:GetResults()
+    if type(results) ~= "table" then
+        return "bad_results_type:" .. type(results)
+    end
+    if type(results[1]) ~= "table" then
+        return "bad_item_type:" .. type(results[1])
+    end
+
+    local arr = results[1]
+    return tostring(arr[1]) .. "|" .. tostring(arr[2]) .. "|" .. tostring(arr[4]) .. "|" .. tostring(arr[3] == nil)
+end
+
 MP.RegisterEvent("onPlayerAuth", "onPlayerAuth")
 MP.RegisterEvent("postPlayerAuth", "postPlayerAuth")
+MP.RegisterEvent("arrayBoundaryEvent", "arrayBoundaryHandler")
 )");
 
     auto LoadResult = engine.EnqueueScript(StateId, TLuaChunk(Script, "event_contract.lua", "beammp_server_test_resources/Server/LuaEventContractTest"));
     LoadResult->WaitUntilReady();
-    auto LoadSnapshot = LoadResult->GetDetachedSnapshot();
+    auto LoadSnapshot = LoadResult->GetSnapshot();
     CHECK(!LoadSnapshot.Error);
 
     const std::unordered_map<std::string, std::string> Identifiers {
@@ -1414,6 +1441,14 @@ MP.RegisterEvent("postPlayerAuth", "postPlayerAuth")
     const auto* PostPlayerAuthValue = std::get_if<std::string>(&PostPlayerAuthSnapshot.Result.V);
     REQUIRE(PostPlayerAuthValue != nullptr);
     CHECK(*PostPlayerAuthValue == "post:false::guest8133569:USER:true:410.0.24.1:123456");
+
+    auto ArrayRoundtrip = engine.EnqueueFunctionCall(StateId, "verifyArrayBoundaryRoundtrip", {}, "verifyArrayBoundaryRoundtrip");
+    ArrayRoundtrip->WaitUntilReady();
+    auto ArrayRoundtripSnapshot = ArrayRoundtrip->GetDetachedSnapshot();
+    CHECK(!ArrayRoundtripSnapshot.Error);
+    const auto* ArrayRoundtripValue = std::get_if<std::string>(&ArrayRoundtripSnapshot.Result.V);
+    REQUIRE(ArrayRoundtripValue != nullptr);
+    CHECK(*ArrayRoundtripValue == "first|second|true|true");
 
     Application::GracefullyShutdown();
 }

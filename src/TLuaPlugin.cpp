@@ -44,7 +44,7 @@ TLuaPlugin::TLuaPlugin(TLuaEngine& Engine, const TLuaPluginConfig& Config, const
         std::transform(secondStr.begin(), secondStr.end(), secondStr.begin(), ::tolower);
         return firstStr < secondStr;
     });
-    std::vector<std::pair<fs::path, std::shared_ptr<TLuaResult>>> ResultsToCheck;
+    std::vector<std::pair<fs::path, std::shared_ptr<TLuaVoidResult>>> ResultsToCheck;
     for (const auto& Entry : Entries) {
         // read in entire file
         try {
@@ -63,7 +63,7 @@ TLuaPlugin::TLuaPlugin(TLuaEngine& Engine, const TLuaPluginConfig& Config, const
     }
     for (auto& Result : ResultsToCheck) {
         Result.second->WaitUntilReady();
-        auto Snapshot = Result.second->GetDetachedSnapshot();
+        auto Snapshot = Result.second->GetSnapshot();
         if (Snapshot.Error) {
             beammp_lua_error("Failed: \"" + Result.first.string() + "\": " + Snapshot.ErrorMessage);
         }

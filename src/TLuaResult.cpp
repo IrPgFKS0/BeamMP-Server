@@ -17,8 +17,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "TLuaResult.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <sol/unsafe_function_result.hpp>
 #include <stdexcept>
 #include <thread>
@@ -64,12 +67,75 @@ std::ostream& operator<<(std::ostream& os, const TDetachedLuaValue& value) {
     return os;
 }
 
+void TLuaVoidResult::MarkReadySuccess() {
+    std::unique_lock Lock(mMutex);
+    mError = false;
+    mErrorMessage.clear();
+    MarkAsReady();
+}
+
+void TLuaVoidResult::MarkReadyError(sol::protected_function_result Res) {
+    std::unique_lock Lock(mMutex);
+    mError = true;
+    SetErrorMessageFromResult(Res);
+    MarkAsReady();
+}
+
+void TLuaVoidResult::MarkReadyError(std::string Res) {
+    std::unique_lock Lock(mMutex);
+    mError = true;
+    mErrorMessage = std::move(Res);
+    MarkAsReady();
+}
+
+bool TLuaVoidResult::IsReady() const {
+    std::unique_lock Lock(mMutex);
+    return mReady;
+}
+
+bool TLuaVoidResult::IsError() const {
+    std::unique_lock Lock(mMutex);
+    return mError;
+}
+
+TLuaVoidResult::Snapshot TLuaVoidResult::GetSnapshot() const {
+    std::unique_lock Lock(mMutex);
+    Snapshot snapshot {
+        .Error = mError,
+        .Ready = mReady,
+        .ErrorMessage = mErrorMessage,
+        .StateId = mStateId,
+    };
+    return snapshot;
+}
+
+void TLuaVoidResult::MarkAsReady() {
+    mReady = true;
+    mReadyCondition.notify_all();
+}
+
+void TLuaVoidResult::WaitUntilReady() {
+    std::unique_lock Lock(mMutex);
+    while (!mReady)
+        mReadyCondition.wait_for(Lock, std::chrono::milliseconds(50),
+            [this] {
+                return mReady;
+            });
+}
+
 
 void TLuaResult::MarkReadySuccess(sol::object Res) {
     std::unique_lock Lock(mMutex);
     mError = false;
-    mResult = Res;
     mDetachedResult = Freeze(Res);
+
+    MarkAsReady();
+}
+
+void TLuaResult::MarkReadySuccessNoResult() {
+    std::unique_lock Lock(mMutex);
+    mError = false;
+    mDetachedResult = { { std::monostate { } } };
 
     MarkAsReady();
 }
@@ -109,21 +175,6 @@ void TLuaResult::SetOwnerState(TLuaStateId StateId) {
     mStateId = std::move(StateId);
 }
 
-TLuaResult::Snapshot TLuaResult::GetSnapshot(TLuaStateId CallingState) const {
-    std::unique_lock Lock(mMutex);
-    if (CallingState != mStateId) {
-        throw std::logic_error("Tried to get snapshot from non-owning state (use a detached snapshot instead)");
-    }
-    Snapshot snapshot {
-        .Error = mError,
-        .Ready = mReady,
-        .ErrorMessage = mErrorMessage,
-        .Result = mResult,
-        .StateId = mStateId,
-        .Function = mFunction,
-    };
-    return snapshot;
-}
 TLuaResult::DetachedSnapshot TLuaResult::GetDetachedSnapshot() const {
     std::unique_lock Lock(mMutex);
     DetachedSnapshot snapshot {
@@ -155,13 +206,45 @@ TDetachedLuaValue TLuaResult::Freeze(const sol::object& o, int depth) {
     case sol::type::string:
         return { { o.as<std::string>() } };
     case sol::type::table: {
-        TDetachedLuaValue::Object out;
+        TDetachedLuaValue::Object ObjectOut;
+        // numeric stuff is for arrays
+        std::vector<std::pair<size_t, TDetachedLuaValue>> NumericEntries;
+        bool HasNonStringOrNumericKey = false;
+        size_t MaxNumericIndex = 0;
         for (auto&& [k, v] : o.as<sol::table>()) {
-            if (!k.is<std::string>())
-                continue; // no numeric-key handling, don't need it
-            out.emplace(k.as<std::string>(), std::make_shared<TDetachedLuaValue>(std::move(Freeze(v, depth + 1))));
+            if (k.is<std::string>()) {
+                ObjectOut.emplace(k.as<std::string>(), std::make_shared<TDetachedLuaValue>(std::move(Freeze(v, depth + 1))));
+                continue;
+            }
+            // Thanks to lua handling arrays in a weird way, and because they can also be sparse, this weird code is needed.
+            if (k.get_type() == sol::type::number) {
+                const double NumericKey = k.as<double>();
+                const size_t CandidateIndex = static_cast<size_t>(NumericKey);
+                // unsure if we need to do this, or if we can do the same int check we do in other places, but this works well
+                const bool IsPositiveInteger = std::isfinite(NumericKey)
+                    && NumericKey >= 1.0
+                    && std::fabs(NumericKey - static_cast<double>(CandidateIndex)) <= std::numeric_limits<double>::epsilon();
+                if (IsPositiveInteger) {
+                    const auto Index = CandidateIndex;
+                    MaxNumericIndex = std::max(MaxNumericIndex, Index);
+                    NumericEntries.emplace_back(Index, Freeze(v, depth + 1));
+                    continue;
+                }
+            }
+            HasNonStringOrNumericKey = true;
         }
-        return { { std::move(out) } };
+        // Pure numeric-keyed tables are reconstructed as Lua arrays (1-based indexes).
+        // This preserves array semantics across this serialization boundary :^)
+        if (!NumericEntries.empty() && ObjectOut.empty() && !HasNonStringOrNumericKey) {
+            TDetachedLuaValue::Array ArrayOut(MaxNumericIndex);
+            for (const auto& [Index, Value] : NumericEntries) {
+                if (Index > 0 && Index <= ArrayOut.size()) {
+                    ArrayOut[Index - 1] = Value;
+                }
+            }
+            return { { std::move(ArrayOut) } };
+        }
+        return { { std::move(ObjectOut) } };
     }
     default:
         throw std::runtime_error("unsupported Lua type for cross-thread snapshot");
@@ -179,6 +262,41 @@ void TLuaResult::WaitUntilReady() {
             [this] {
                 return mReady;
             });
+}
+
+TEST_CASE("TLuaInStateResult MarkReadyError(string) marks ready and wakes waiters") {
+    TLuaVoidResult result("state_local");
+    std::atomic<bool> waiterDone { false };
+
+    auto waiter = std::thread([&] {
+        result.WaitUntilReady();
+        waiterDone.store(true, std::memory_order_release);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_FALSE(waiterDone.load(std::memory_order_acquire));
+
+    result.MarkReadyError(std::string("boom"));
+    waiter.join();
+
+    CHECK(result.IsReady());
+    const auto snapshot = result.GetSnapshot();
+    CHECK(snapshot.Ready);
+    CHECK(snapshot.Error);
+    CHECK(snapshot.ErrorMessage == "boom");
+    CHECK(snapshot.StateId == "state_local");
+}
+
+TEST_CASE("TLuaInStateResult MarkReadySuccess clears error state") {
+    TLuaVoidResult result("state_local_success");
+    result.MarkReadySuccess();
+
+    CHECK(result.IsReady());
+    CHECK_FALSE(result.IsError());
+    const auto snapshot = result.GetSnapshot();
+    CHECK(snapshot.Ready);
+    CHECK_FALSE(snapshot.Error);
+    CHECK(snapshot.ErrorMessage.empty());
 }
 
 TEST_CASE("TLuaResult MarkReadyError(string) marks ready and wakes waiters") {
@@ -203,16 +321,6 @@ TEST_CASE("TLuaResult MarkReadyError(string) marks ready and wakes waiters") {
     CHECK(snapshot.ErrorMessage == "boom");
     CHECK(snapshot.StateId == "state_a");
     CHECK(snapshot.Function == "fn_a");
-}
-
-TEST_CASE("TLuaResult GetSnapshot enforces owner state id") {
-    sol::state lua;
-    TLuaResult result("owner_state", "fn_owner");
-    lua.open_libraries(sol::lib::base);
-    result.MarkReadySuccess(sol::make_object(lua.lua_state(), std::string("ok")));
-
-    CHECK_NOTHROW(result.GetSnapshot("owner_state"));
-    CHECK_THROWS_AS(result.GetSnapshot("different_state"), std::logic_error);
 }
 
 TEST_CASE("TLuaResult detached snapshot freezes nested string-keyed tables") {
@@ -258,6 +366,41 @@ TEST_CASE("TLuaResult detached snapshot freezes nested string-keyed tables") {
     CHECK(*innerValue == "v");
 }
 
+TEST_CASE("TLuaResult detached snapshot preserves numeric array tables") {
+    sol::state lua;
+    TLuaResult result("state_array", "fn_array");
+    lua.open_libraries(sol::lib::base);
+
+    auto arr = lua.create_table();
+    arr[1] = std::string("a");
+    arr[2] = 42;
+    arr[4] = true; // keep sparse indexes
+
+    result.MarkReadySuccess(sol::make_object(lua.lua_state(), arr));
+    const auto detached = result.GetDetachedSnapshot();
+
+    CHECK(detached.Ready);
+    CHECK_FALSE(detached.Error);
+
+    const auto* array = std::get_if<TDetachedLuaValue::Array>(&detached.Result.V);
+    REQUIRE(array != nullptr);
+    REQUIRE(array->size() == 4);
+
+    const auto* v1 = std::get_if<std::string>(&(*array)[0].V);
+    REQUIRE(v1 != nullptr);
+    CHECK(*v1 == "a");
+
+    const auto* v2 = std::get_if<int>(&(*array)[1].V);
+    REQUIRE(v2 != nullptr);
+    CHECK(*v2 == 42);
+
+    CHECK(std::holds_alternative<std::monostate>((*array)[2].V));
+
+    const auto* v4 = std::get_if<bool>(&(*array)[3].V);
+    REQUIRE(v4 != nullptr);
+    CHECK(*v4);
+}
+
 TEST_CASE("TLuaResult MarkReadySuccess throws on unsupported Lua function value") {
     sol::state lua;
     TLuaResult result("state_fn", "fn_fn");
@@ -269,4 +412,14 @@ TEST_CASE("TLuaResult MarkReadySuccess throws on unsupported Lua function value"
 
     CHECK_THROWS_AS(result.MarkReadySuccess(fnObj), std::runtime_error);
     CHECK_FALSE(result.IsReady());
+}
+
+TEST_CASE("TLuaResult MarkReadySuccessNoResult stores monostate") {
+    TLuaResult result("state_empty", "fn_empty");
+    result.MarkReadySuccessNoResult();
+
+    CHECK(result.IsReady());
+    const auto snapshot = result.GetDetachedSnapshot();
+    CHECK_FALSE(snapshot.Error);
+    CHECK(std::holds_alternative<std::monostate>(snapshot.Result.V));
 }
