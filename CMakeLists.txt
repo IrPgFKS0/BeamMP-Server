@@ -8,7 +8,7 @@ include(cmake/Vcpkg.cmake) # needs to happen before project()
 
 project(
     "BeamMP-Server" # replace this
-    VERSION 3.3.0
+    VERSION 3.9.2
 )
 
 include(cmake/StandardSettings.cmake)
@@ -39,6 +39,7 @@ set(PRJ_HEADERS
     include/TConfig.h
     include/TConsole.h
     include/THeartbeatThread.h
+    include/TIoPollThread.h
     include/TLuaEngine.h
     include/TLuaPlugin.h
     include/TNetwork.h
@@ -52,6 +53,8 @@ set(PRJ_HEADERS
     include/Settings.h
     include/Profiling.h
     include/ChronoWrapper.h
+    include/TConnectionLimiter.h
+    include/TLuaResult.h
 )
 # add all source files (.cpp) to this, except the one with main()
 set(PRJ_SOURCES
@@ -65,6 +68,7 @@ set(PRJ_SOURCES
     src/TConfig.cpp
     src/TConsole.cpp
     src/THeartbeatThread.cpp
+    src/TIoPollThread.cpp
     src/TLuaEngine.cpp
     src/TLuaPlugin.cpp
     src/TNetwork.cpp
@@ -78,6 +82,8 @@ set(PRJ_SOURCES
     src/Settings.cpp
     src/Profiling.cpp
     src/ChronoWrapper.cpp
+    src/TConnectionLimiter.cpp
+    src/TLuaResult.cpp
 )
 
 find_package(Lua REQUIRED)
