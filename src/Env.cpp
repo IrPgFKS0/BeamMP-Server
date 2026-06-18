@@ -45,6 +45,9 @@ std::string_view Env::ToString(Env::Key key) {
     case Key::PROVIDER_IP_ENV:
         return "BEAMMP_PROVIDER_IP_ENV";
         break;
+    case Key::MAX_CONCURRENT_CONNECTIONS:
+        return "BEAMMP_MAX_CONCURRENT_CONNECTIONS";
+        break;
     }
     return "";
 }

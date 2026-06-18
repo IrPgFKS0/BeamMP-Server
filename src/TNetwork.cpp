@@ -19,6 +19,7 @@
 #include "TNetwork.h"
 #include "Client.h"
 #include "Common.h"
+#include "Env.h"
 #include "LuaAPI.h"
 #include "TConnectionLimiter.h"
 #include "THeartbeatThread.h"
@@ -45,8 +46,24 @@
 
 typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVTIMEO> rcv_timeout_option;
 
-static constexpr uint8_t MAX_CONCURRENT_CONNECTIONS = 10;
 static constexpr uint8_t MAX_GLOBAL_CONNECTIONS = 128;
+static const uint8_t MAX_CONCURRENT_CONNECTIONS = []() -> uint8_t {
+    if (auto EnvVar = Env::Get(Env::Key::MAX_CONCURRENT_CONNECTIONS)) {
+        try {
+            beammp_debugf("BEAMMP_MAX_CONCURRENT_CONNECTIONS: {}", EnvVar.value());
+            if (const int value = std::stoi(std::string(EnvVar.value())); value > 0 && value <= MAX_GLOBAL_CONNECTIONS) {
+                beammp_debugf("BEAMMP_MAX_CONCURRENT_CONNECTIONS Parsed: {}", value);
+                return static_cast<uint8_t>(value);
+            }
+
+            beammp_warn("Env variable BEAMMP_MAX_CONCURRENT_CONNECTIONS is out of range, using default value.");
+        } catch (const std::exception&) {
+            beammp_warn("Error parsing Env variable BEAMMP_MAX_CONCURRENT_CONNECTIONS, using default value.");
+        }
+    }
+
+    return 10;
+}();
 static constexpr uint8_t READ_TIMEOUT_S = 10; // seconds
 
 std::vector<uint8_t> StringToVector(const std::string& Str) {
