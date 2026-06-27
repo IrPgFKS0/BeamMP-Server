@@ -23,6 +23,7 @@
 namespace Env {
 
 enum class Key {
+    MAX_CONCURRENT_CONNECTIONS,
     // provider settings
     PROVIDER_UPDATE_MESSAGE,
     PROVIDER_DISABLE_CONFIG,
