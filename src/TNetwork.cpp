@@ -31,6 +31,7 @@
 #include <array>
 #include <cctype>
 #include <functional>
+#include <unordered_map>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/address_v4.hpp>
@@ -1126,6 +1127,13 @@ void TNetwork::SyncResources(TClient& c) {
         // TODO handle
     }
     std::vector<uint8_t> Data;
+    // Per-mod 'f<name>' request tally for THIS sync. A well-behaved client downloads each mod ONCE
+    // (a verified download exits its loop). Repeated requests for the SAME mod mean the client keeps
+    // rejecting a good transfer -- an outdated launcher with the no-success-exit download loop
+    // (< p13h26), a stale/locked client cache, or a genuine size/hash mismatch. Surface it in the
+    // HOST log instead of leaving only a silent wall of identical "Download ... took Xms" lines
+    // (exactly what made the LAN2 loop hard to read).
+    std::unordered_map<std::string, int> ReqCounts;
     while (!c.IsDisconnected()) {
         Data = TCPRcv(c);
         if (Data.empty()) {
@@ -1135,6 +1143,17 @@ void TNetwork::SyncResources(TClient& c) {
         constexpr std::string_view Done = "Done";
         if (std::equal(Data.begin(), Data.end(), Done.begin(), Done.end()))
             break;
+        if (Data.front() == 'f') {
+            std::string Mod(reinterpret_cast<const char*>(Data.data() + 1), Data.size() - 1);
+            const int n = ++ReqCounts[Mod];
+            if (n == 4) { // warn once, after a couple of legit retries, so it's a signal not spam
+                beammp_warnf("Client {} ('{}') has re-requested mod '{}' {} times this join -- likely a "
+                             "CLIENT-side re-download loop (outdated launcher < p13h26, or a stale/locked "
+                             "client cache). The server is serving the file fine; update/clear the cache on "
+                             "THAT player's machine.",
+                    c.GetID(), c.GetName(), Mod, n);
+            }
+        }
         Parse(c, Data);
     }
 }
@@ -1151,6 +1170,13 @@ void TNetwork::Parse(TClient& c, const std::vector<uint8_t>& Packet) {
         return;
     case 'S':
         if (SubCode == 'R') {
+            // Reflect the CURRENT Resources/Client state for THIS joining client. Mods can be
+            // added / updated / removed while the server is running (e.g. hot-swapping a fixed
+            // mod); without refreshing here we'd advertise the stale hash/size we cached at
+            // startup while SendFile serves the NEW file -> the client's size/hash never matches
+            // and it re-downloads forever. Cheap when nothing changed (mods.json cache); a
+            // changed file is re-hashed once, a removed file is dropped, a new file is added.
+            mResourceManager.RefreshFiles();
             beammp_debug("Sending Mod Info");
             std::string ToSend = mResourceManager.GetMods().dump();
             beammp_debugf("Mod Info: {}", ToSend);
@@ -1453,7 +1479,10 @@ bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {
             std::lock_guard<std::mutex> Lk(Link->ToClientMtx);
             // Bound the server->game position queue (latest-wins) so a stalled game drain can't grow
             // it without limit. Matches the launcher's inbound bound. TCP (events) is never dropped.
-            constexpr size_t kMaxToClientUDP = 256;
+            // TIGHT (16 ~= 0.27s at the 60Hz send ceiling): a brief drain stall now sheds STALE
+            // positions instead of hoarding them as latency -- the deep buffer was the "degrades over
+            // time" (256 hid ~4s). The predictor only extrapolates ~0.3s ahead, so deeper = pure lag.
+            constexpr size_t kMaxToClientUDP = 16;
             while (Link->ToClientUDP.size() >= kMaxToClientUDP) {
                 Link->ToClientUDP.pop();
             }

@@ -31,7 +31,12 @@ public:
     [[nodiscard]] std::string TrimmedList() const { return mTrimmedList; }
     [[nodiscard]] std::string FileSizes() const { return mFileSizes; }
     [[nodiscard]] int ModsLoaded() const { return mModsLoaded; }
-    [[nodiscard]] nlohmann::json GetMods() const { return mMods; }
+    [[nodiscard]] nlohmann::json GetMods() const {
+        // lock: RefreshFiles() rebuilds mMods under mModsMutex (now also called per client
+        // join), so reading it unlocked would race a concurrent refresh. Returns a copy.
+        std::unique_lock Lock(mModsMutex);
+        return mMods;
+    }
 
     // LAN: mods may live in named subfolders of Resources/Client (for
     // organization). Clients still request a bare filename, so resolve it to the
@@ -48,7 +53,7 @@ private:
     std::string mTrimmedList;
     int mModsLoaded = 0;
 
-    std::mutex mModsMutex;
+    mutable std::mutex mModsMutex;
     nlohmann::json mMods = nlohmann::json::array();
     // filename (e.g. "foo.zip") -> full path (may be inside a subfolder)
     std::unordered_map<std::string, std::string> mModPaths;
