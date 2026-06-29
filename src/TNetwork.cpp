@@ -27,7 +27,10 @@
 #include "nlohmann/json.hpp"
 #include <CustomAssert.h>
 #include <Http.h>
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <functional>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/address_v4.hpp>
@@ -141,6 +144,15 @@ void TNetwork::UDPServerMain() {
     if (ec) {
         beammp_warnf("Failed to unset IP_V6ONLY on UDP, only IPv6 will work: {}", ec.message());
     }
+    // LAN/perf: raise the UDP receive buffer. UDPServerMain is a SINGLE thread that recvfrom()s
+    // every client's position stream and forwards it; under load (many cars x ~100Hz x N clients)
+    // the OS-default receive buffer overflows and the kernel DROPS incoming packets -> the remote
+    // cars freeze/drift even while CPU is low. A deep buffer absorbs bursts. The OS may cap this
+    // (Linux net.core.rmem_max / Windows) -- see the LAN tuning docs for raising the cap.
+    mUDPSock.set_option(boost::asio::socket_base::receive_buffer_size(16 * 1024 * 1024), ec);
+    if (ec) {
+        beammp_warnf("Failed to raise UDP receive buffer: {}", ec.message());
+    }
     mUDPSock.bind(UdpListenEndpoint, ec);
     if (ec) {
         beammp_error("bind() failed: " + ec.message());
@@ -164,7 +176,12 @@ void TNetwork::UDPServerMain() {
                 continue;
             }
             auto Pos = std::find(Data.begin(), Data.end(), ':');
-            if (Pos > Data.begin() + 2) {
+            if (Pos == Data.end() || Pos > Data.begin() + 2) {
+                continue;
+            }
+            // C2: first byte is (client id + 1); reject 0 -- it would underflow to 255 and
+            // misroute the packet to a stray client.
+            if (uint8_t(Data.at(0)) < 1) {
                 continue;
             }
             uint8_t ID = uint8_t(Data.at(0)) - 1;
@@ -275,6 +292,14 @@ void TNetwork::TCPServerMain() {
                 beammp_errorf("Failed to accept() new client: {}", ec.message());
                 continue;
             }
+            // LAN-only build: disable Nagle's algorithm so small, latency-sensitive
+            // event/control packets are flushed to the wire immediately instead of
+            // being coalesced. UDP (position/nodes) is unaffected.
+            ClientSocket.set_option(boost::asio::ip::tcp::no_delay(true), ec);
+            if (ec) {
+                beammp_debugf("Failed to set TCP_NODELAY on client socket: {}", ec.message());
+                ec.clear();
+            }
             boost::asio::ip::tcp::endpoint ClientEp = ClientSocket.remote_endpoint(ec);
             if (ec) {
                 beammp_errorf("Accepted socket but failed to query remote endpoint for IP address: {}", ec.message());
@@ -323,7 +348,7 @@ void TNetwork::Identify(TConnection&& RawConnection, TConnectionLimiter::TGuard&
             beammp_errorf("Old download packet detected - the client is wildly out of date, this will be ignored");
             return;
         } else if (Code == 'P') {
-            boost::asio::write(RawConnection.Socket, boost::asio::buffer("P"), ec);
+            boost::asio::write(RawConnection.Socket, boost::asio::buffer("P", 1), ec); // 1 byte, not "P\0"
             return;
         } else if (Code == 'I') {
             const std::string Data = Application::Settings.getAsBool(Settings::Key::General_InformationPacket) ? THeartbeatThread::lastCall : "";
@@ -370,12 +395,36 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     } else {
         ip = RawConnection.SockAddr.address().to_string();
     }
-    Client->SetIdentifier("ip", ip);
     beammp_tracef("This thread is ip {} ({})", ip, RawConnection.SockAddr.address().to_v6().is_v4_mapped() ? "IPv4 mapped IPv6" : "IPv6");
+    return AuthenticationImpl(Client, ip);
+}
 
-    if (Application::GetSubsystemStatuses().at("Main") == Application::Status::Starting) {
-        ClientKick(*Client, "The server is still starting, please try joining again later.");
-        return nullptr;
+// Shared auth/sync body for both real (socket) clients and the combined-host virtual (in-memory)
+// client. All I/O here goes through TCPSend/TCPRcv, which pick the socket or the in-memory link
+// based on Client->IsVirtual() -- so the virtual client authenticates and syncs through the exact
+// same path, driven by the local game over the link.
+std::shared_ptr<TClient> TNetwork::AuthenticationImpl(std::shared_ptr<TClient> Client, const std::string& ip) {
+    Client->SetIdentifier("ip", ip);
+
+    if (Application::GetSubsystemStatus("Main") == Application::Status::Starting) {
+        if (Client->IsVirtual()) {
+            // Combined host: this is the host's OWN client. AddVirtualClient runs from the
+            // server-ready hook, which fires BEFORE the run loop marks "Main" Good -- so the host
+            // would otherwise kick itself with "still starting" on every launch. Instead, hold here
+            // until the server is fully up (or shutting down); the game's join handshake queues on
+            // the in-memory link meanwhile, so nothing is lost.
+            beammp_info("Combined host: holding the host client until the server has finished starting...");
+            while (!Application::IsShuttingDown()
+                && Application::GetSubsystemStatus("Main") == Application::Status::Starting) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (Application::IsShuttingDown()) {
+                return nullptr;
+            }
+        } else {
+            ClientKick(*Client, "The server is still starting, please try joining again later.");
+            return nullptr;
+        }
     }
 
     beammp_info("Identifying new ClientConnection...");
@@ -424,55 +473,40 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         ClientKick(*Client, "Invalid Key (empty)!");
         return nullptr;
     }
-    std::string AuthKey = Application::Settings.getAsString(Settings::Key::General_AuthKey);
     std::string ClientIp = Client->GetIdentifiers().at("ip");
 
-    nlohmann::json AuthReq { };
-    std::string AuthResStr { };
-    try {
-        AuthReq = nlohmann::json {
-            { "key", Key },
-            { "auth_key", AuthKey },
-            { "client_ip", ClientIp }
-        };
-
-        auto Target = "/pkToUser";
-
-        unsigned int ResponseCode = 0;
-        AuthResStr = Http::POST(Application::GetBackendUrlForAuth() + Target, AuthReq.dump(), "application/json", &ResponseCode);
-
-    } catch (const std::exception& e) {
-        beammp_debugf("Invalid json sent by client, kicking: {}", e.what());
-        ClientKick(*Client, "Invalid Key (invalid UTF8 string)!");
-        return nullptr;
-    }
-
-    beammp_debug("Response from authentication backend: " + AuthResStr);
-
-    try {
-        nlohmann::json AuthRes = nlohmann::json::parse(AuthResStr);
-
-        if (AuthRes["username"].is_string() && AuthRes["username"].size() > 0 && AuthRes["roles"].is_string()
-            && AuthRes["guest"].is_boolean() && AuthRes["identifiers"].is_array()) {
-
-            Client->SetName(AuthRes["username"]);
-            Client->SetRoles(AuthRes["roles"]);
-            Client->SetIsGuest(AuthRes["guest"]);
-            for (const auto& ID : AuthRes["identifiers"]) {
-                auto Raw = std::string(ID);
-                auto SepIndex = Raw.find(':');
-                Client->SetIdentifier(Raw.substr(0, SepIndex), Raw.substr(SepIndex + 1));
-            }
-        } else {
-            beammp_error("Invalid authentication data received from authentication backend");
-            ClientKick(*Client, "Invalid authentication data!");
-            return nullptr;
+    // LAN-only build: no online authentication. The "key" the client sends is
+    // simply the player's chosen/auto-generated name. We assign a local identity
+    // here instead of contacting auth.beammp.com (/pkToUser).
+    {
+        std::string Name = Key;
+        // Keep only sane name characters so a malicious client can't inject junk.
+        Name.erase(std::remove_if(Name.begin(), Name.end(),
+                       [](unsigned char c) {
+                           return !(std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == '[' || c == ']' || c == ' ');
+                       }),
+            Name.end());
+        // Trim surrounding spaces.
+        while (!Name.empty() && Name.front() == ' ') {
+            Name.erase(Name.begin());
         }
-    } catch (const std::exception& e) {
-        beammp_errorf("Client sent invalid key. Error was: {}", e.what());
-        // TODO: we should really clarify that this was a backend response or parsing error
-        ClientKick(*Client, "Invalid key! Please restart your game.");
-        return nullptr;
+        while (!Name.empty() && Name.back() == ' ') {
+            Name.pop_back();
+        }
+        if (Name.empty()) {
+            Name = "Player";
+        }
+        if (Name.size() > 32) {
+            Name = Name.substr(0, 32);
+        }
+
+        Client->SetName(Name);
+        Client->SetRoles("USER");
+        Client->SetIsGuest(false);
+        // "ip" identifier is already set above. Add a stable synthetic id so Lua
+        // plugins that key on identifiers still have something to work with.
+        Client->SetIdentifier("beammp", std::to_string(std::hash<std::string> {}(Name) % 100000000));
+        beammp_infof("LAN auth: '{}' joined from {}", Name, ClientIp);
     }
 
     beammp_debug("Name -> " + Client->GetName() + ", Guest -> " + std::to_string(Client->IsGuest()) + ", Roles -> " + Client->GetRoles());
@@ -562,6 +596,26 @@ std::shared_ptr<TClient> TNetwork::CreateClient(boost::asio::ip::tcp::socket&& T
     return c;
 }
 
+std::shared_ptr<TClient> TNetwork::AddVirtualClient() {
+    // Combined-host (--combined): create a socketless client backed by the in-memory link and run
+    // it through the normal auth/sync flow on a dedicated thread. TCPRcv blocks on the link until
+    // the launcher's host-mode loop pushes the local game's join handshake, so this MUST run off
+    // the caller's (server-ready-hook's) thread. The dummy socket is never touched (IsVirtual()).
+    auto Sock = boost::asio::ip::tcp::socket(mServer.IoCtx());
+    auto Client = CreateClient(std::move(Sock));
+    Client->SetInMemoryLink(std::make_unique<InMemoryLink>());
+    Client->SetIsUDPConnected(true); // no UDP magic handshake -- the in-memory link is always up
+    std::thread([this, Client]() {
+        RegisterThreadAuto();
+        try {
+            AuthenticationImpl(Client, "127.0.0.1");
+        } catch (const std::exception& e) {
+            beammp_errorf("Virtual (combined-host) client auth/sync failed: {}", e.what());
+        }
+    }).detach();
+    return Client;
+}
+
 bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync) {
     if (!IsSync) {
         if (c.IsSyncing()) {
@@ -572,6 +626,28 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
             }
             return true;
         }
+    }
+
+    // Virtual (combined-host) client: deliver over the in-memory channel instead of a socket.
+    // The queue preserves message boundaries, so no 4-byte length framing is needed; the
+    // launcher's host-mode loop drains ToClientTCP and feeds it to the game.
+    if (c.IsVirtual()) {
+        auto* Link = c.Link();
+        size_t Depth;
+        {
+            std::lock_guard<std::mutex> Lk(Link->ToClientMtx);
+            Link->ToClientTCP.push(Data);
+            Depth = Link->ToClientTCP.size();
+        }
+        Link->ToClientCv.notify_all(); // two waiters share this CV: the launcher's RecvTCP + RecvUDP
+        // Reliable/event queue: never dropped -- but warn if it backs up past a generous cap (the host
+        // launcher's read stalled). Logs once per crossing.
+        constexpr size_t kTcpBacklogWarn = 4096;
+        if (Depth == kTcpBacklogWarn) {
+            beammp_warn("Combined host: server->game event queue backlog (" + std::to_string(Depth) + ") -- host launcher read may be stalled.");
+        }
+        c.UpdatePingTime();
+        return true;
     }
 
     auto& Sock = c.GetTCPSock();
@@ -590,7 +666,12 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
     std::memcpy(ToSend.data(), &Size, sizeof(Size));
     std::memcpy(ToSend.data() + sizeof(Size), Data.data(), Data.size());
     boost::system::error_code ec;
-    boost::asio::write(Sock, boost::asio::buffer(ToSend), ec);
+    {
+        // C1: serialize writes to this socket. Multiple threads call TCPSend() on the same
+        // client; concurrent boost::asio::write() interleaves bytes and corrupts the framing.
+        std::unique_lock<std::mutex> SendLock(c.TCPSendMutex());
+        boost::asio::write(Sock, boost::asio::buffer(ToSend), ec);
+    }
     if (ec) {
         beammp_debugf("write(): {}", ec.message());
         DisconnectClient(c, "write() failed");
@@ -604,6 +685,28 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
     if (c.IsDisconnected()) {
         beammp_error("Client disconnected, cancelling TCPRcv");
         return { };
+    }
+
+    // Virtual (combined-host) client: pop one message from the in-memory channel. The launcher's
+    // host-mode loop pushes UNCOMPRESSED, already-deframed messages (no ABG:/length prefix), so we
+    // return it as-is -- the socket path's header read + ABG: decompression below don't apply.
+    if (c.IsVirtual()) {
+        auto* Link = c.Link();
+        std::unique_lock<std::mutex> Lk(Link->FromClientMtx);
+        auto Ready = [&] { return !Link->FromClientTCP.empty() || Link->Closed.load(); };
+        if (WithTimeout) {
+            if (!Link->FromClientCv.wait_for(Lk, std::chrono::seconds(READ_TIMEOUT_S), Ready)) {
+                return { }; // timeout
+            }
+        } else {
+            Link->FromClientCv.wait(Lk, Ready);
+        }
+        if (Link->FromClientTCP.empty()) {
+            return { }; // link closed
+        }
+        auto Msg = std::move(Link->FromClientTCP.front());
+        Link->FromClientTCP.pop();
+        return Msg;
     }
 
     int32_t Header { };
@@ -658,7 +761,11 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c, bool WithTimeout) {
     }
 
     if (N != Header) {
-        beammp_errorf("Expected to read {} bytes, instead got {}", Header, N);
+        // H4: a short read means the stream is now misaligned -- the next read would frame
+        // on garbage. Don't hand truncated data to the parser; bail (caller treats empty as a
+        // closed/failed read).
+        beammp_errorf("Expected to read {} bytes, instead got {} -- dropping truncated packet", Header, N);
+        return { };
     }
 
     constexpr std::string_view ABG = "ABG:";
@@ -1076,7 +1183,14 @@ void TNetwork::SendFile(TClient& c, const std::string& UnsafeName) {
         }
     }
 
-    FileName = Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "/Client/" + FileName;
+    // Resolve to the real on-disk path (mods may live in named subfolders).
+    // FileName is already reduced to a bare filename above, so this lookup can
+    // only return a path the server itself scanned (no traversal risk).
+    std::string ResolvedPath = mResourceManager.PathForMod(FileName);
+    if (ResolvedPath.empty()) {
+        ResolvedPath = Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "/Client/" + FileName;
+    }
+    FileName = ResolvedPath;
 
     if (!std::filesystem::exists(FileName)) {
         if (!TCPSend(c, StringToVector("CO"))) {
@@ -1104,6 +1218,11 @@ void TNetwork::SendFile(TClient& c, const std::string& UnsafeName) {
 #endif
 void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name) {
     TScopedTimer timer(fmt::format("Download of '{}' for client {}", Name, c.GetID()));
+    // C1: hold the per-client send mutex for the ENTIRE file transfer so the Looper/Lua can't
+    // interleave a packet between the file chunks (sendfile on Linux, TCPSendRaw on Windows) and
+    // corrupt the download. Deadlock-free: TCPSendRaw is only called from here (so it must NOT lock
+    // itself) and DisconnectClient does not send.
+    std::unique_lock<std::mutex> SendLock(c.TCPSendMutex());
 #if defined(BEAMMP_LINUX)
     signal(SIGPIPE, SIG_IGN);
     // on linux, we can use sendfile(2)!
@@ -1204,6 +1323,9 @@ bool TNetwork::SendLarge(TClient& c, std::vector<uint8_t> Data, bool isSync) {
 }
 
 bool TNetwork::Respond(TClient& c, const std::vector<uint8_t>& MSG, bool Rel, bool isSync) {
+    if (MSG.empty()) {
+        return true; // H5: nothing to send; .at(0) below would throw on an empty payload.
+    }
     char C = MSG.at(0);
     if (Rel || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || compressBound(MSG.size()) > 1024) {
         if (C == 'O' || C == 'T' || MSG.size() > 1000) {
@@ -1274,6 +1396,9 @@ bool TNetwork::SyncClient(const std::weak_ptr<TClient>& c) {
 void TNetwork::SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self, bool Rel) {
     if (!Self)
         beammp_assert(c);
+    if (Data.empty()) {
+        return; // H5: empty payload -> .at(0) below would throw.
+    }
     char C = Data.at(0);
     bool ret = true;
     mServer.ForEachClient([&](std::weak_ptr<TClient> ClientPtr) -> bool {
@@ -1316,6 +1441,27 @@ void TNetwork::SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self
 }
 
 bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {
+    // Virtual (combined-host) client: deliver over the in-memory channel, uncompressed (no
+    // bandwidth concern in-process; the launcher feeds it straight to the game). No UDP handshake
+    // needed -- the in-memory link is always "connected".
+    if (Client.IsVirtual()) {
+        if (Client.IsDisconnected()) {
+            return true;
+        }
+        auto* Link = Client.Link();
+        {
+            std::lock_guard<std::mutex> Lk(Link->ToClientMtx);
+            // Bound the server->game position queue (latest-wins) so a stalled game drain can't grow
+            // it without limit. Matches the launcher's inbound bound. TCP (events) is never dropped.
+            constexpr size_t kMaxToClientUDP = 256;
+            while (Link->ToClientUDP.size() >= kMaxToClientUDP) {
+                Link->ToClientUDP.pop();
+            }
+            Link->ToClientUDP.push(std::move(Data));
+        }
+        Link->ToClientCv.notify_all(); // two waiters share this CV: the launcher's RecvTCP + RecvUDP
+        return true;
+    }
     if (!Client.IsUDPConnected() || Client.IsDisconnected()) {
         // this can happen if we try to send a packet to a client that is either
         // 1. not yet fully connected, or
@@ -1338,8 +1484,19 @@ bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {
     return true;
 }
 
+void TNetwork::HandleVirtualUDP(std::weak_ptr<TClient> Client, std::vector<uint8_t> Data) {
+    // Virtual (combined-host) client's incoming UDP, fed by the launcher's host-mode drain from the
+    // in-memory channel. Same processing as UDPServerMain's per-packet dispatch (GlobalParser) but
+    // with no endpoint routing/2-byte strip -- the launcher pushes the raw payload for the known
+    // host client.
+    mServer.GlobalParser(std::move(Client), std::move(Data), mPPSMonitor, *this, true);
+}
+
 std::vector<uint8_t> TNetwork::UDPRcvFromClient(boost::asio::ip::udp::endpoint& ClientEndpoint) {
-    std::array<char, 1024> Ret { };
+    // M2: was 1024 -- a compressed position packet with several moving cars can exceed that and
+    // get silently truncated (the datagram tail is lost and the recv reports message_size),
+    // dropping the position update. Size to the UDP max so a datagram is never clipped.
+    std::array<char, 65535> Ret { };
     boost::system::error_code ec;
     const auto Rcv = mUDPSock.receive_from(boost::asio::mutable_buffer(Ret.data(), Ret.size()), ClientEndpoint, 0, ec);
     if (ec) {

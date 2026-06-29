@@ -100,6 +100,14 @@ public:
         mConsole.InitializeCommandline();
     }
 
+    // Embedded/combined-host mode: the server runs in-process inside the LAN launcher, which owns
+    // the terminal and the process lifecycle. When set (once, before the server thread starts), the
+    // server does NOT create an interactive console, does NOT read stdin, does NOT write to stdout,
+    // and does NOT install signal handlers -- it logs to Server.log only. This avoids the two
+    // consoles fighting one terminal and the narrow-stdout vs the launcher's wide/_O_U8TEXT clash.
+    static void SetEmbedded(bool Val) { mEmbedded = Val; }
+    static bool IsEmbedded() { return mEmbedded; }
+
     enum class Status {
         Starting,
         Good,
@@ -115,6 +123,15 @@ public:
         return mSystemStatusMap;
     }
 
+    // Thread-safe read of a single subsystem's status (returns a copy under the lock). Safe to poll,
+    // unlike GetSubsystemStatuses().at(name) which touches the map after the lock is released.
+    // Unknown names report Starting (treated as "not ready yet").
+    static Status GetSubsystemStatus(const std::string& Subsystem) {
+        std::unique_lock Lock(mSystemStatusMapMutex);
+        auto It = mSystemStatusMap.find(Subsystem);
+        return It != mSystemStatusMap.end() ? It->second : Status::Starting;
+    }
+
     static void SetSubsystemStatus(const std::string& Subsystem, Status status);
 
 private:
@@ -126,6 +143,9 @@ private:
     static inline TConsole mConsole;
     static inline std::shared_mutex mShutdownMtx {};
     static inline bool mShutdown { false };
+    // Set once before the server thread spawns (safe publication via thread creation), then only
+    // ever read -- no concurrent write, so a plain bool needs no atomic. See SetEmbedded().
+    static inline bool mEmbedded { false };
     static inline std::mutex mShutdownHandlersMutex {};
     static inline std::deque<TShutdownHandler> mShutdownHandlers {};
 

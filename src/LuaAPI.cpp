@@ -168,6 +168,13 @@ std::pair<bool, std::string> LuaAPI::MP::TriggerClientEvent(int PlayerID, const 
     return InternalTriggerClientEvent(PlayerID, EventName, Data);
 }
 
+uint32_t LuaAPI::MP::ChangeMap(const std::string& MapPath) {
+    if (!Engine) {
+        return 0;
+    }
+    return Engine->Server().ChangeMap(MapPath);
+}
+
 std::pair<bool, std::string> LuaAPI::MP::DropPlayer(int ID, std::optional<std::string> MaybeReason) {
     auto MaybeClient = GetClient(Engine->Server(), ID);
     if (MaybeClient) {

@@ -22,6 +22,7 @@
 #include "RWMutex.h"
 #include "TIoPollThread.h"
 #include "TScopedTimer.h"
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -49,6 +50,13 @@ public:
     static void HandleEvent(TClient& c, const std::string& Data);
     RWMutex& GetClientMutex() const { return mClientsMutex; }
 
+    // Seamless map switch: set General/Map, bump the session generation, clear every
+    // client's cars + mark them transitioning, and broadcast the `onMapChange` event.
+    // Connected clients load the new level without a reconnect/Lua reload (see the
+    // client-side MPCoreNetwork.beginMapTransition). Returns the new generation.
+    uint32_t ChangeMap(const std::string& MapPath);
+    [[nodiscard]] uint32_t CurrentMapGeneration() const { return mMapGeneration.load(std::memory_order_acquire); }
+
     const TScopedTimer UptimeTimer;
 
     io_context& IoCtx() { return mIoCtxPoller.IoCtx(); }
@@ -57,6 +65,7 @@ private:
     TIoPollThread mIoCtxPoller;
     TClientSet mClients;
     mutable RWMutex mClientsMutex;
+    std::atomic<uint32_t> mMapGeneration { 0 };
     static void ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Network);
     static bool ShouldSpawn(TClient& c, const std::string& CarJson, int ID);
     static bool IsUnicycle(TClient& c, const std::string& CarJson);

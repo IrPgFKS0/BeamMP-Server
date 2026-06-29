@@ -112,14 +112,24 @@ void TConsole::BackupOldLog() {
     }
 }
 
-void TConsole::StartLoggingToFile() {
-    mLogFileStream.open("Server.log");
-    Application::Console().Internal().on_write = [this](const std::string& ToWrite) {
-        // TODO: Sanitize by removing all ansi escape codes (vt100)
-        std::unique_lock Lock(mLogFileStreamMtx);
+void TConsole::WriteToLogFile(const std::string& ToWrite) {
+    std::unique_lock Lock(mLogFileStreamMtx);
+    if (mLogFileStream.is_open()) {
         mLogFileStream.write(ToWrite.c_str(), ToWrite.size());
         mLogFileStream.write("\n", 1);
         mLogFileStream.flush();
+    }
+}
+
+void TConsole::StartLoggingToFile() {
+    mLogFileStream.open("Server.log");
+    if (Application::IsEmbedded()) {
+        // No commandline in embedded mode; Write()/WriteRaw() call WriteToLogFile() directly.
+        return;
+    }
+    Application::Console().Internal().on_write = [this](const std::string& ToWrite) {
+        // TODO: Sanitize by removing all ansi escape codes (vt100)
+        WriteToLogFile(ToWrite);
     };
 }
 
@@ -220,7 +230,8 @@ void TConsole::Command_Help(const std::string&, const std::vector<std::string>& 
         clear                      clears the console window
         version                    displays the server version
         protectmod <name> <value>  sets whether a mod is protected, value can be true or false
-        reloadmods                 reloads all mods from the Resources Client folder)";
+        reloadmods                 reloads all mods from the Resources Client folder
+        map <level path>           seamlessly switches all clients to a new map (e.g. /levels/italy/info.json))";
     Application::Console().WriteRaw("BeamMP-Server Console: " + std::string(sHelpString));
 }
 
@@ -290,6 +301,62 @@ void TConsole::Command_ReloadMods(const std::string& cmd, const std::vector<std:
 
     mLuaEngine->Network().ResourceManager().RefreshFiles();
     Application::Console().WriteRaw("Mods reloaded.");
+}
+
+void TConsole::Command_Map(const std::string&, const std::vector<std::string>& args) {
+    if (!EnsureArgsCount(args, 1, size_t(-1))) {
+        Application::Console().WriteRaw("Usage: map <level path>   e.g.  map /levels/italy/info.json");
+        return;
+    }
+    // Join args so paths containing spaces still work; trim surrounding quotes.
+    std::string MapPath = ConcatArgs(args);
+    if (MapPath.size() >= 2 && (MapPath.front() == '"' || MapPath.front() == '\'') && MapPath.back() == MapPath.front()) {
+        MapPath = MapPath.substr(1, MapPath.size() - 2);
+    }
+    if (MapPath.empty()) {
+        Application::Console().WriteRaw("Usage: map <level path>   e.g.  map /levels/italy/info.json");
+        return;
+    }
+    const uint32_t Gen = mLuaEngine->Server().ChangeMap(MapPath);
+    Application::Console().WriteRaw("Seamless map change to '" + MapPath + "' broadcast to all clients (generation "
+        + std::to_string(Gen) + "). Connected players load it without re-downloading mods or reloading.");
+}
+
+void TConsole::Command_SaveLogs(const std::string&, const std::vector<std::string>&) {
+    // Writes a server-side state snapshot (version/map/generation/players) next to Server.log.
+    // The in-game "/savelogs" (and the launcher's log-zip) then bundle Server.log + this file
+    // with the client/launcher logs into one zip in the launcher folder.
+    try {
+        std::time_t t = std::time(nullptr);
+        char ts[32] = { 0 };
+        std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", std::localtime(&t));
+        std::string outName = std::string("server_state_") + ts + ".txt";
+
+        std::ofstream f(outName, std::ios::trunc);
+        if (!f.good()) {
+            Application::Console().WriteRaw("savelogs: could not write " + outName);
+            return;
+        }
+        auto& Server = mLuaEngine->Server();
+        f << "=== BeamMP Server state ===\n";
+        f << "time:            " << ts << "\n";
+        f << "server version:  " << Application::ServerVersionString() << "\n";
+        f << "map:             " << Application::Settings.getAsString(Settings::Key::General_Map) << "\n";
+        f << "map generation:  " << Server.CurrentMapGeneration() << "\n";
+        f << "players (" << Server.ClientCount() << "):\n";
+        Server.ForEachClient([&f](const std::weak_ptr<TClient>& wp) {
+            if (auto c = wp.lock()) {
+                f << "  - id " << c->GetID() << "  cars " << c->GetCarCount() << "  name '" << c->GetName() << "'\n";
+            }
+            return true;
+        });
+        f.flush();
+        f.close();
+        Application::Console().WriteRaw("savelogs: wrote " + outName + " (next to Server.log). "
+            "In-game /savelogs (or the launcher log-zip) bundles Server.log + this with the client logs.");
+    } catch (const std::exception& e) {
+        Application::Console().WriteRaw(std::string("savelogs failed: ") + e.what());
+    }
 }
 
 void TConsole::Command_NetTest(const std::string& cmd, const std::vector<std::string>& args) {
@@ -790,6 +857,13 @@ TConsole::TConsole() {
 }
 
 void TConsole::InitializeCommandline() {
+    if (Application::IsEmbedded()) {
+        // Combined host: the launcher owns the terminal. Do NOT create the interactive commandline
+        // (no prompt, no stdin reader, no stdout redraw) -- rotate the log and return. Write() /
+        // WriteRaw() then go straight to Server.log via WriteToLogFile().
+        BackupOldLog();
+        return;
+    }
     mCommandline = std::make_unique<Commandline>();
     mCommandline->enable_history();
     mCommandline->set_history_limit(20);
@@ -906,6 +980,13 @@ void TConsole::InitializeCommandline() {
 
 void TConsole::Write(const std::string& str) {
     auto ToWrite = GetDate() + str;
+    if (Application::IsEmbedded()) {
+        // Combined host: never touch stdout (the launcher owns it, in wide/_O_U8TEXT mode). Log to
+        // Server.log only. Lines before StartLoggingToFile() opens the file are dropped (startup
+        // chatter only); the launcher reports the key milestones on screen itself.
+        WriteToLogFile(ToWrite);
+        return;
+    }
     // allows writing to stdout without an initialized console
     if (mCommandline) {
         mCommandline->write(ToWrite);
@@ -915,6 +996,10 @@ void TConsole::Write(const std::string& str) {
 }
 
 void TConsole::WriteRaw(const std::string& str) {
+    if (Application::IsEmbedded()) {
+        WriteToLogFile(str);
+        return;
+    }
     // allows writing to stdout without an initialized console
     if (mCommandline) {
         mCommandline->write(str);

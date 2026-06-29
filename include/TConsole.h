@@ -46,6 +46,10 @@ public:
     Commandline& Internal() { return *mCommandline; }
 
 private:
+    // Append one line to Server.log (thread-safe). Used directly in embedded mode, where there is
+    // no commandline to drive the file write via its on_write hook.
+    void WriteToLogFile(const std::string& ToWrite);
+
     void RunAsCommand(const std::string& cmd, bool IgnoreNotACommand = false);
     void ChangeToLuaConsole(const std::string& LuaStateId);
     void ChangeToRegularConsole();
@@ -62,6 +66,8 @@ private:
     void Command_ProtectMod(const std::string& cmd, const std::vector<std::string>& args);
     void Command_ReloadMods(const std::string& cmd, const std::vector<std::string>& args);
     void Command_NetTest(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_Map(const std::string& cmd, const std::vector<std::string>& args);
+    void Command_SaveLogs(const std::string& cmd, const std::vector<std::string>& args);
 
     void Command_Say(const std::string& FullCommand);
     bool EnsureArgsCount(const std::vector<std::string>& args, size_t n);
@@ -83,6 +89,8 @@ private:
         { "protectmod", [this](const auto& a, const auto& b) { Command_ProtectMod(a, b); } },
         { "reloadmods", [this](const auto& a, const auto& b) { Command_ReloadMods(a, b); } },
         { "nettest", [this](const auto& a, const auto& b) { Command_NetTest(a, b); } },
+        { "map", [this](const auto& a, const auto& b) { Command_Map(a, b); } },
+        { "savelogs", [this](const auto& a, const auto& b) { Command_SaveLogs(a, b); } },
     };
 
     std::unique_ptr<Commandline> mCommandline { nullptr };

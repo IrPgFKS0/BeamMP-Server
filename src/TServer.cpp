@@ -40,8 +40,17 @@
 
 static std::optional<std::pair<int, int>> GetPidVid(const std::string& str) {
     auto IDSep = str.find('-');
+    // H1: with no '-', substr(0,npos)=whole string and substr(npos+1)=substr(0)=whole string,
+    // so both pid and vid become the same all-digit string and the packet is misrouted to a
+    // plausible-looking {N,N}. Require the separator.
+    if (IDSep == std::string::npos) {
+        return std::nullopt;
+    }
     std::string pid = str.substr(0, IDSep);
     std::string vid = str.substr(IDSep + 1);
+    if (pid.empty() || vid.empty()) {
+        return std::nullopt; // e.g. "-0" / "0-": the digit check below is vacuously true on ""
+    }
 
     if (pid.find_first_not_of("0123456789") == std::string::npos && vid.find_first_not_of("0123456789") == std::string::npos) {
         try {
@@ -121,7 +130,7 @@ TEST_CASE("GetPidVid") {
     }
 }
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
-    beammp_info("BeamMP Server v" + Application::ServerVersionString());
+    beammp_info("BeamMP LAN Server v" + Application::ServerVersionString());
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
     Application::SetSubsystemStatus("Server", Application::Status::Good);
 }
@@ -154,6 +163,61 @@ void TServer::ForEachClient(const std::function<bool(std::weak_ptr<TClient>)>& F
 size_t TServer::ClientCount() const {
     ReadLock Lock(mClientsMutex);
     return mClients.size();
+}
+
+// Seamless map switch: may this client use the in-game /map command? Admins = the
+// configured General/AdminName, plus (optionally) loopback clients on a single-box host.
+static bool IsMapAdmin(const TClient& c) {
+    if (Application::Settings.getAsBool(Settings::Key::General_AllowLoopbackAdmin)) {
+        const auto& ids = c.GetIdentifiers();
+        auto it = ids.find("ip");
+        if (it != ids.end()) {
+            const std::string& ip = it->second;
+            if (ip == "::1" || ip.rfind("127.", 0) == 0) {
+                return true;
+            }
+        }
+    }
+    const std::string AdminName = Application::Settings.getAsString(Settings::Key::General_AdminName);
+    return !AdminName.empty() && c.GetName() == AdminName;
+}
+
+// Seamless map switch: handle "/map <name|path>" typed in chat (admin-gated). Accepts a
+// short level name (expanded to /levels/<name>/info.json) or a full level path. Returns
+// true if the message was a /map command (so the caller doesn't broadcast it as chat).
+static void HandleMapChatCommand(TClient& c, const std::string& Message, TNetwork& Network) {
+    auto Reply = [&](const std::string& Text) {
+        (void)Network.Respond(c, StringToVector("C:Server: " + Text), true);
+    };
+    auto isSp = [](char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; };
+    std::string Arg;
+    auto SpacePos = Message.find(' ');
+    if (SpacePos != std::string::npos) {
+        Arg = Message.substr(SpacePos + 1);
+    }
+    while (!Arg.empty() && isSp(Arg.front())) {
+        Arg.erase(Arg.begin());
+    }
+    while (!Arg.empty() && isSp(Arg.back())) {
+        Arg.pop_back();
+    }
+    // "/map" or "/map list": ask the requesting client to print its available maps
+    // (the client enumerates core_levels.getList(), which includes synced MODDED maps,
+    // and marks them). Informational, so it is NOT admin-gated.
+    if (Arg.empty() || Arg == "list") {
+        (void)Network.Respond(c, StringToVector("E:mapList:"), true);
+        return;
+    }
+    // "/map <name|path>": the actual switch is admin-gated.
+    if (!IsMapAdmin(c)) {
+        beammp_infof("Player '{}' ({}) tried /map without permission", c.GetName(), c.GetID());
+        Reply("You are not allowed to change the map. (type /map for the list)");
+        return;
+    }
+    const std::string MapPath = (Arg.find('/') == std::string::npos) ? ("/levels/" + Arg + "/info.json") : Arg;
+    const uint32_t Gen = c.Server().ChangeMap(MapPath);
+    beammp_infof("Player '{}' ({}) changed map to '{}' (generation {})", c.GetName(), c.GetID(), MapPath, Gen);
+    Network.SendToAll(nullptr, StringToVector("C:Server: " + c.GetName() + " switched the map to " + MapPath), true, true);
 }
 
 void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uint8_t>&& Packet, TPPSMonitor& PPSMonitor, TNetwork& Network, bool udp) {
@@ -192,6 +256,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
 
     // V to Y
     if (Code <= 89 && Code >= 86) {
+        // Seamless map switch: drop a transitioning client's stale old-map vehicle
+        // data so it isn't rebroadcast to peers who already loaded the new map.
+        if (LockedClient->IsTransitioning())
+            return;
         int PID = -1;
         int VID = -1;
 
@@ -232,6 +300,10 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             beammp_debugf("Received 'O' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
             return;
         }
+        // Seamless map switch: ignore old-map spawn/edit/delete events from a client
+        // that is still transitioning (it will re-spawn after sending its map-ready ack).
+        if (LockedClient->IsTransitioning())
+            return;
         if (Packet.size() > 1000) {
             beammp_debug(("Received data from: ") + LockedClient->GetName() + (" Size: ") + std::to_string(Packet.size()));
         }
@@ -257,6 +329,12 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         if (Message.size() > 500) {
            beammp_debugf("Chat message too long from '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
            return;
+        }
+        // Seamless map switch: intercept the "/map <name>" chat command (admin-gated) so it
+        // isn't broadcast/logged as a normal chat message. The console `map` stays the fallback.
+        if (Message == "/map" || Message.rfind("/map ", 0) == 0) {
+            HandleMapChatCommand(*LockedClient, Message, Network);
+            return;
         }
         auto Futures = LuaAPI::MP::Engine->TriggerEvent("onChatMessage", "", LockedClient->GetID(), LockedClient->GetName(), Message);
         TLuaEngine::WaitForAll(Futures);
@@ -291,7 +369,31 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
     case 'N':
         Network.SendToAll(LockedClient.get(), Packet, false, true);
         return;
+    case 'B': // LAN fork: networked weapon-explosion sync -- relay the owner's authoritative
+              // blast to all OTHER clients (reliable/TCP); the sender already applied it locally.
+        Network.SendToAll(LockedClient.get(), Packet, false, true);
+        return;
+    case 'M': // seamless map switch: client map-ready ack -> "Mr<generation>"
+        if (Packet.size() >= 2 && Packet.at(1) == 'r') {
+            uint32_t Gen = 0;
+            try {
+                Gen = static_cast<uint32_t>(std::stoul(StringPacket.substr(2)));
+            } catch (const std::exception&) {
+                return;
+            }
+            // Only clear the fence once the client has loaded the CURRENT map
+            // (ignore acks for a superseded generation after a rapid re-switch).
+            if (Gen == mMapGeneration.load(std::memory_order_acquire)) {
+                LockedClient->SetMapGeneration(Gen);
+                LockedClient->SetTransitioning(false);
+                beammp_debugf("Client '{}' ({}) ready on map generation {}", LockedClient->GetName(), LockedClient->GetID(), Gen);
+            }
+        }
+        return;
     case 'Z': { // position packet
+        // Seamless map switch: drop a transitioning client's stale old-map positions.
+        if (LockedClient->IsTransitioning())
+            return;
         PPSMonitor.IncrementInternalPPS();
 
         int PID = -1;
@@ -316,6 +418,34 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
     }
 }
 
+uint32_t TServer::ChangeMap(const std::string& MapPath) {
+    // Persist the new map so any late joiner receives it via the normal handshake.
+    Application::Settings.set(Settings::Key::General_Map, MapPath);
+    // Bump the session generation: every connected client must now load this map and
+    // ack it ("Mr<gen>") before its vehicle/position packets are accepted again.
+    const uint32_t Gen = ++mMapGeneration;
+    ForEachClient([&](std::weak_ptr<TClient> ClientPtr) -> bool {
+        if (auto c = ClientPtr.lock()) {
+            c->ClearCars();
+            c->SetMapGeneration(Gen);
+            // Only fence clients already in the session: they have old-map vehicles and
+            // run the coordinated transition (ack required). A client still doing its
+            // initial handshake isn't fenced -- it receives the new map via the normal
+            // join (we already updated General/Map) and would never send a map-ready ack.
+            c->SetTransitioning(c->IsSynced());
+        }
+        return true;
+    });
+    // Coordinated push over the reliable channel; the client mod's onMapChange handler
+    // (MPGameNetwork AddEventHandler) loads the level without a reconnect/Lua reload.
+    const std::string Packet = "E:onMapChange:" + MapPath + ":" + std::to_string(Gen);
+    if (LuaAPI::MP::Engine) {
+        LuaAPI::MP::Engine->Network().SendToAll(nullptr, StringToVector(Packet), true, true);
+    }
+    beammp_infof("Map change to '{}' (generation {}) requested for {} client(s)", MapPath, Gen, ClientCount());
+    return Gen;
+}
+
 void TServer::HandleEvent(TClient& c, const std::string& RawData) {
     // E:Name:Data
     // Data is allowed to have ':'
@@ -325,7 +455,10 @@ void TServer::HandleEvent(TClient& c, const std::string& RawData) {
     }
     auto NameDataSep = RawData.find(':', 2);
     if (NameDataSep == std::string::npos) {
+        // C3: without the ':', substr(NameDataSep+1) wraps to substr(0) and the whole raw packet
+        // is fired into Lua handlers as the event data with a garbled name. Drop it.
         beammp_warn("received event in invalid format (missing ':'), got: '" + RawData + "'");
+        return;
     }
     std::string Name = RawData.substr(2, NameDataSep - 2);
     std::string Data = RawData.substr(NameDataSep + 1);

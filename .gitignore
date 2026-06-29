@@ -478,3 +478,9 @@ callgrind.*
 notes/*
 compile_commands.json
 nohup.out
+bin-linux/
+build/
+dist/
+.vcpkg-cache/
+.DS_Store
+name

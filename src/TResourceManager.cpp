@@ -20,47 +20,114 @@
 #include "Common.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fmt/core.h>
 #include <ios>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <unordered_set>
 
 namespace fs = std::filesystem;
+
+// LAN: folders inside Resources/Client whose mods should NOT be served. Lets the
+// host keep disabled mods around (e.g. removed_maps, unused) while organizing the
+// active ones in named subfolders. A leading '.' or '_' also marks a folder as
+// ignored (handy convention for staging).
+static bool IsDisabledModDir(const std::string& Name) {
+    if (Name.empty()) {
+        return false;
+    }
+    if (Name.front() == '.' || Name.front() == '_') {
+        return true;
+    }
+    std::string Lower = Name;
+    std::transform(Lower.begin(), Lower.end(), Lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return Lower == "unused" || Lower.rfind("removed", 0) == 0;
+}
 
 TResourceManager::TResourceManager() {
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Starting);
     std::string Path = Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "/Client";
     if (!fs::exists(Path))
         fs::create_directories(Path);
-    for (const auto& entry : fs::directory_iterator(Path)) {
-        std::string File(entry.path().string());
-        if (auto pos = File.find(".zip"); pos != std::string::npos) {
-            if (File.length() - pos == 4) {
-                std::replace(File.begin(), File.end(), '\\', '/');
-                mFileList += File + ';';
-                if (auto i = File.find_last_of('/'); i != std::string::npos) {
-                    ++i;
-                    File = File.substr(i, pos - i);
-                }
-                mTrimmedList += "/" + fs::path(File).filename().string() + ';';
-                mFileSizes += std::to_string(size_t(fs::file_size(entry.path()))) + ';';
-                mMaxModSize += size_t(fs::file_size(entry.path()));
-                mModsLoaded++;
+    // Scan Resources/Client recursively so mods can be organized in named
+    // subfolders. Clients still see/request a flat filename, so duplicate names
+    // across folders are not allowed (first wins). Disabled folders are skipped.
+    std::unordered_set<std::string> seen;
+    std::vector<std::pair<size_t, std::string>> modSizes; // for the crash-risk "largest mods" hint
+    fs::recursive_directory_iterator it(Path, fs::directory_options::skip_permission_denied), end;
+    for (; it != end; ++it) {
+        const auto& entry = *it;
+        std::error_code ec;
+        if (entry.is_directory(ec)) {
+            if (IsDisabledModDir(entry.path().filename().string())) {
+                it.disable_recursion_pending();
             }
+            continue;
         }
+        if (entry.path().extension() != ".zip") {
+            continue;
+        }
+        std::string FullPath(entry.path().string());
+        std::replace(FullPath.begin(), FullPath.end(), '\\', '/');
+        std::string FileName = entry.path().filename().string();
+        if (!seen.insert(FileName).second) {
+            beammp_warnf("Duplicate mod filename '{}' in Resources/Client; serving only the first, ignoring '{}'", FileName, FullPath);
+            continue;
+        }
+        const auto Size = size_t(fs::file_size(entry.path()));
+        mFileList += FullPath + ';';
+        mTrimmedList += "/" + FileName + ';';
+        mFileSizes += std::to_string(Size) + ';';
+        mMaxModSize += Size;
+        mModsLoaded++;
+        modSizes.emplace_back(Size, FileName);
+        mModPaths[FileName] = FullPath;
+
+        // Startup audit: show each served mod and the subfolder it lives in, so
+        // redundant/overlapping bundles are easy to spot. "." = directly in Client.
+        std::error_code relEc;
+        auto rel = fs::relative(entry.path().parent_path(), Path, relEc).generic_string();
+        if (rel.empty() || relEc) {
+            rel = ".";
+        }
+        beammp_infof("  [mod] {:<10} {} ({:.1f} MB)", rel + "/", FileName, double(Size) / (1024.0 * 1024.0));
     }
 
     if (mModsLoaded) {
         beammp_info("Loaded " + std::to_string(mModsLoaded) + " Mods");
+        // Crash-risk heads-up. Per BeamNG's own error-code docs, exit code 0xC0000005 on map-load
+        // "usually means ... the game exceeded the allocated budget" -- an internal engine resource
+        // budget (mostly TEXTURES), NOT system RAM, and there is NO fixed mod-count limit (it is
+        // resource-dependent). So we key the warning on TOTAL SIZE, not count. Tune MOD_WARN_GB to
+        // just below the host's observed crash point.
+        static constexpr double MOD_WARN_GB = 18.0;
+        const double totalGB = double(mMaxModSize) / (1024.0 * 1024.0 * 1024.0);
+        beammp_infof("Served mod set: {} mods, {:.1f} GB total", mModsLoaded, totalGB);
+        if (totalGB > MOD_WARN_GB) {
+            std::sort(modSizes.begin(), modSizes.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            std::string biggest;
+            for (size_t i = 0; i < modSizes.size() && i < 3; ++i) {
+                if (i) biggest += ", ";
+                biggest += modSizes[i].second + " (" + std::to_string(modSizes[i].first / (1024 * 1024)) + " MB)";
+            }
+            beammp_warnf("Large mod set: {:.1f} GB across {} mods (over the {:.0f} GB heads-up "
+                         "threshold). BeamNG can crash CLIENTS on map-load with exit code 0xC0000005 "
+                         "(\"exceeded the allocated budget\") once the texture/resource volume crosses "
+                         "an internal engine limit -- a base-game limit, NOT RAM. If clients crash "
+                         "loading the map, remove the largest served mods and retry. Largest: {}",
+                         totalGB, mModsLoaded, MOD_WARN_GB, biggest);
+        }
     }
 
     Application::SetSubsystemStatus("ResourceManager", Application::Status::Good);
 }
 
 void TResourceManager::RefreshFiles() {
-    mMods.clear();
     std::unique_lock Lock(mModsMutex);
+    mMods.clear();
+    mModPaths.clear();
 
     std::string Path = Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "/Client";
 
@@ -78,17 +145,37 @@ void TResourceManager::RefreshFiles() {
         }
     }
 
-    for (const auto& entry : fs::directory_iterator(Path)) {
-        std::string File(entry.path().string());
-
-        if (entry.path().filename().string() == "mods.json") {
+    std::unordered_set<std::string> seen;
+    fs::recursive_directory_iterator it(Path, fs::directory_options::skip_permission_denied), end;
+    for (; it != end; ++it) {
+        const auto& entry = *it;
+        std::error_code ec;
+        if (entry.is_directory(ec)) {
+            if (IsDisabledModDir(entry.path().filename().string())) {
+                it.disable_recursion_pending();
+            }
             continue;
         }
 
-        if (entry.path().extension() != ".zip" || std::filesystem::is_directory(entry.path())) {
+        std::string File(entry.path().string());
+        std::replace(File.begin(), File.end(), '\\', '/');
+        std::string FileName = entry.path().filename().string();
+
+        if (FileName == "mods.json") {
+            continue;
+        }
+
+        if (entry.path().extension() != ".zip") {
             beammp_warnf("'{}' is not a ZIP file and will be ignored", File);
             continue;
         }
+
+        if (!seen.insert(FileName).second) {
+            beammp_warnf("Duplicate mod filename '{}' in Resources/Client; serving only the first, ignoring '{}'", FileName, File);
+            continue;
+        }
+
+        mModPaths[FileName] = File;
 
         if (modsDB.contains(entry.path().filename().string())) {
             auto& dbEntry = modsDB[entry.path().filename().string()];
@@ -184,12 +271,12 @@ void TResourceManager::RefreshFiles() {
         }
     }
 
-    for (auto it = modsDB.begin(); it != modsDB.end();) {
-        if (!it.value().contains("exists")) {
-            it = modsDB.erase(it);
+    for (auto dbIt = modsDB.begin(); dbIt != modsDB.end();) {
+        if (!dbIt.value().contains("exists")) {
+            dbIt = modsDB.erase(dbIt);
         } else {
-            it.value().erase("exists");
-            ++it;
+            dbIt.value().erase("exists");
+            ++dbIt;
         }
     }
 
@@ -202,6 +289,15 @@ void TResourceManager::RefreshFiles() {
     } catch (std::exception& e) {
         beammp_error("Failed to update mod DB: " + std::string(e.what()));
     }
+}
+
+std::string TResourceManager::PathForMod(const std::string& FileName) {
+    std::unique_lock Lock(mModsMutex);
+    auto it = mModPaths.find(FileName);
+    if (it != mModPaths.end()) {
+        return it->second;
+    }
+    return "";
 }
 
 void TResourceManager::SetProtected(const std::string& ModName, bool Protected) {

@@ -28,113 +28,17 @@
 
 void THeartbeatThread::operator()() {
     RegisterThread("Heartbeat");
-    std::string Body;
-    std::string T;
-
-    // these are "hot-change" related variables
-    static std::string Last;
-
-    static std::chrono::high_resolution_clock::time_point LastNormalUpdateTime = std::chrono::high_resolution_clock::now();
-    static std::chrono::high_resolution_clock::time_point LastUpdateReminderTime = std::chrono::high_resolution_clock::now();
-    bool isAuth = false;
-    std::chrono::high_resolution_clock::duration UpdateReminderTimePassed;
+    // LAN-only build: the server never registers with the BeamMP backend
+    // (no server list, no online auth). We still regenerate the info payload
+    // locally so the InformationPacket feature keeps working for direct-connect
+    // clients (server name / players / map shown before joining) -- we just never
+    // POST it anywhere. Players join via Direct Connect.
+    beammp_info("LAN-only mode: backend heartbeat disabled (server is not listed publicly).");
+    Application::SetSubsystemStatus("Heartbeat", Application::Status::Good);
     while (!Application::IsShuttingDown()) {
-        auto UpdateReminderTimeout = ChronoWrapper::TimeFromStringWithLiteral(Application::Settings.getAsString(Settings::Key::Misc_UpdateReminderTime));
-        Body = GenerateCall();
-        // a hot-change occurs when a setting has changed, to update the backend of that change.
-        auto Now = std::chrono::high_resolution_clock::now();
-        bool Unchanged = Last == Body;
-        auto TimePassed = (Now - LastNormalUpdateTime);
-        UpdateReminderTimePassed = (Now - LastUpdateReminderTime);
-        auto Threshold = Unchanged ? 30 : 5;
-        if (TimePassed < std::chrono::seconds(Threshold)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
-        beammp_debug("heartbeat (after " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(TimePassed).count()) + "s)");
-
-        Last = Body;
-        LastNormalUpdateTime = Now;
-
-        auto Target = "/heartbeat";
-        unsigned int ResponseCode = 0;
-
-        nlohmann::json Doc;
-        bool Ok = false;
-        for (const auto& Url : Application::GetBackendUrlsInOrder()) {
-            T = Http::POST(Url + Target, Body, "application/json", &ResponseCode, { { "api-v", "2" } });
-
-            if (!Application::Settings.getAsBool(Settings::Key::General_Private)) {
-                beammp_debug("Backend response was: `" + T + "`");
-            }
-
-            Doc = nlohmann::json::parse(T, nullptr, false);
-            if (Doc.is_discarded() || !Doc.is_object()) {
-                if (!Application::Settings.getAsBool(Settings::Key::General_Private)) {
-                    beammp_trace("Backend response failed to parse as valid json");
-                }
-            } else if (ResponseCode != 200) {
-                beammp_errorf("Response code from the heartbeat: {}", ResponseCode);
-            } else {
-                // all ok
-                Ok = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-        std::string Status {};
-        std::string Code {};
-        std::string Message {};
-        const auto StatusKey = "status";
-        const auto CodeKey = "code";
-        const auto MessageKey = "msg";
-
-        if (Ok) {
-            if (Doc.contains(StatusKey) && Doc[StatusKey].is_string()) {
-                Status = Doc[StatusKey];
-            } else {
-                Ok = false;
-            }
-            if (Doc.contains(CodeKey) && Doc[CodeKey].is_string()) {
-                Code = Doc[CodeKey];
-            } else {
-                Ok = false;
-            }
-            if (Doc.contains(MessageKey) && Doc[MessageKey].is_string()) {
-                Message = Doc[MessageKey];
-            } else {
-                Ok = false;
-            }
-            if (!Ok) {
-                beammp_error("Missing/invalid json members in backend response");
-            }
-        } else {
-            if (!Application::Settings.getAsBool(Settings::Key::General_Private)) {
-                beammp_warn("Backend failed to respond to a heartbeat. Your server may temporarily disappear from the server list. This is not an error, and will likely resolve itself soon. Direct connect will still work.");
-            }
-        }
-
-        if (Ok && !isAuth && !Application::Settings.getAsBool(Settings::Key::General_Private)) {
-            if (Status == "2000") {
-                beammp_info(("Authenticated! " + Message));
-                isAuth = true;
-            } else if (Status == "200") {
-                beammp_info(("Resumed authenticated session! " + Message));
-                isAuth = true;
-            } else {
-                if (Message.empty()) {
-                    Message = "Backend didn't provide a reason.";
-                }
-                beammp_error("Backend REFUSED the auth key. Reason: " + Message);
-            }
-        }
-        if (isAuth || Application::Settings.getAsBool(Settings::Key::General_Private)) {
-            Application::SetSubsystemStatus("Heartbeat", Application::Status::Good);
-        }
-        if (!Application::Settings.getAsBool(Settings::Key::Misc_ImScaredOfUpdates) && UpdateReminderTimePassed.count() > UpdateReminderTimeout.count()) {
-            LastUpdateReminderTime = std::chrono::high_resolution_clock::now();
-            Application::CheckForUpdates();
-        }
+        // Refresh THeartbeatThread::lastCall, consumed by the 'I' info packet.
+        GenerateCall();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 }
 

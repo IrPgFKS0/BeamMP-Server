@@ -33,6 +33,9 @@ namespace MP {
     std::pair<bool, std::string> TriggerClientEvent(int PlayerID, const std::string& EventName, const sol::object& Data);
     std::pair<bool, std::string> TriggerClientEventJson(int PlayerID, const std::string& EventName, const sol::table& Data);
     inline size_t GetPlayerCount() { return Engine->Server().ClientCount(); }
+    // Seamless map switch: set the map and coordinate every connected client to load it
+    // without a reconnect/Lua reload (see TServer::ChangeMap). Returns the new generation.
+    uint32_t ChangeMap(const std::string& MapPath);
     std::pair<bool, std::string> DropPlayer(int ID, std::optional<std::string> MaybeReason);
     std::pair<bool, std::string> SendChatMessage(int ID, const std::string& Message, const bool& LogChat = true);
     std::pair<bool, std::string> SendNotification(int ID, const std::string& Message, const std::string& Icon, const std::string& Category);

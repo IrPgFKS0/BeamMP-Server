@@ -87,6 +87,8 @@ struct Settings {
         General_Debug,
         General_AllowGuests,
         General_InformationPacket,
+        General_AdminName,           // seamless map switch: name allowed to use the /map chat command ("" = console-only)
+        General_AllowLoopbackAdmin,  // seamless map switch: treat loopback (same-box host) clients as admin
     };
 
     Sync<std::unordered_map<Key, SettingsTypeVariant>> SettingsMap;

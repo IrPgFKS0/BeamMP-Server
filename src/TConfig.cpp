@@ -60,6 +60,10 @@ static constexpr std::string_view StrAllowGuests = "AllowGuests";
 static constexpr std::string_view EnvStrAllowGuests = "BEAMMP_ALLOW_GUESTS";
 static constexpr std::string_view StrInformationPacket = "InformationPacket";
 static constexpr std::string_view EnvStrInformationPacket = "BEAMMP_INFORMATION_PACKET";
+static constexpr std::string_view StrAdminName = "AdminName";
+static constexpr std::string_view EnvStrAdminName = "BEAMMP_ADMIN_NAME";
+static constexpr std::string_view StrAllowLoopbackAdmin = "AllowLoopbackAdmin";
+static constexpr std::string_view EnvStrAllowLoopbackAdmin = "BEAMMP_ALLOW_LOOPBACK_ADMIN";
 static constexpr std::string_view StrPassword = "Password";
 
 // Misc
@@ -140,6 +144,10 @@ void TConfig::FlushToFile() {
     data["General"][StrInformationPacket.data()] = Application::Settings.getAsBool(Settings::Key::General_InformationPacket);
     data["General"][StrAllowGuests.data()] = Application::Settings.getAsBool(Settings::Key::General_AllowGuests);
     SetComment(data["General"][StrAllowGuests.data()].comments(), " Whether to allow guests");
+    data["General"][StrAdminName.data()] = Application::Settings.getAsString(Settings::Key::General_AdminName);
+    SetComment(data["General"][StrAdminName.data()].comments(), " Player name allowed to use the in-game /map <name> command. Empty (\"\") = console-only (no in-game map switching).");
+    data["General"][StrAllowLoopbackAdmin.data()] = Application::Settings.getAsBool(Settings::Key::General_AllowLoopbackAdmin);
+    SetComment(data["General"][StrAllowLoopbackAdmin.data()].comments(), " Treat clients connecting from loopback (the same machine as the server) as admin, so a single-box host can use /map without setting AdminName.");
     data["General"][StrIP.data()] = Application::Settings.getAsString(Settings::Key::General_IP);
     SetComment(data["General"][StrIP.data()].comments(), " The IP address to bind the server to, this is NOT related to your public IP. Can be used if your machine has multiple network interfaces");
     data["General"][StrPort.data()] = Application::Settings.getAsInt(Settings::Key::General_Port);
@@ -216,6 +224,14 @@ void TConfig::TryReadValue(toml::value& Table, const std::string& Category, cons
         }
     }
 
+    // A newly-added setting won't exist in an older config file. toml11 yields an
+    // `empty`-typed value for an absent key, so keep the default silently instead of
+    // emitting a spurious "unexpected type" warning -- FlushToFile writes the key out so
+    // the next start has it. (Only a key that IS present but has the wrong type warns.)
+    if (Table[Category.c_str()][Key.data()].is_empty()) {
+        return;
+    }
+
     std::visit([&Table, &Category, &Key, &key](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
         if constexpr (std::is_same_v<T, std::string>) {
@@ -273,6 +289,8 @@ void TConfig::ParseFromFile(std::string_view name) {
         TryReadValue(data, "General", StrAuthKey, EnvStrAuthKey, Settings::Key::General_AuthKey);
         TryReadValue(data, "General", StrLogChat, EnvStrLogChat, Settings::Key::General_LogChat);
         TryReadValue(data, "General", StrAllowGuests, EnvStrAllowGuests, Settings::Key::General_AllowGuests);
+        TryReadValue(data, "General", StrAdminName, EnvStrAdminName, Settings::Key::General_AdminName);
+        TryReadValue(data, "General", StrAllowLoopbackAdmin, EnvStrAllowLoopbackAdmin, Settings::Key::General_AllowLoopbackAdmin);
         // Misc
         TryReadValue(data, "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Key::Misc_ImScaredOfUpdates);
         TryReadValue(data, "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Key::Misc_UpdateReminderTime);
@@ -288,20 +306,12 @@ void TConfig::ParseFromFile(std::string_view name) {
     if (!mDisableConfig) {
         FlushToFile();
     }
-    // all good so far, let's check if there's a key
-    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).empty()) {
-        if (mDisableConfig) {
-            beammp_error("No AuthKey specified in the environment.");
-        } else {
-            beammp_error("No AuthKey specified in the \"" + std::string(mConfigFileName) + "\" file. Please get an AuthKey, enter it into the config file, and restart this server.");
-        }
-        Application::SetSubsystemStatus("Config", Application::Status::Bad);
-        mFailed = true;
-        return;
-    }
+    // LAN-only build: an AuthKey is no longer required. The server does not
+    // register with the BeamMP backend and does not verify player keys online,
+    // so it starts fine with an empty AuthKey. (Any value entered is ignored.)
     Application::SetSubsystemStatus("Config", Application::Status::Good);
-    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).size() != 36) {
-        beammp_warn("AuthKey specified is the wrong length and likely isn't valid.");
+    if (Application::Settings.getAsString(Settings::Key::General_AuthKey).empty()) {
+        beammp_info("LAN-only mode: no AuthKey needed, the server is not listed publicly. Use Direct Connect to join.");
     }
 }
 

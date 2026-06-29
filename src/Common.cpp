@@ -49,8 +49,9 @@ void Application::GracefullyShutdown() {
     static uint8_t ShutdownAttempts = 0;
     if (AlreadyShuttingDown) {
         ++ShutdownAttempts;
-        // hard shutdown at 2 additional tries
-        if (ShutdownAttempts == 2) {
+        // hard shutdown at 2 additional tries -- but never in embedded mode: std::exit(0) would
+        // take down the whole launcher process, which owns the lifecycle in combined-host mode.
+        if (ShutdownAttempts == 2 && !Application::IsEmbedded()) {
             beammp_info("hard shutdown forced by multiple shutdown requests");
             std::exit(0);
         }
@@ -211,43 +212,9 @@ TEST_CASE("Application::SetSubsystemStatus") {
 }
 
 void Application::CheckForUpdates() {
-    Application::SetSubsystemStatus("UpdateCheck", Application::Status::Starting);
-    static bool FirstTime = true;
-    // checks current version against latest version
-    std::regex VersionRegex { R"(\d+\.\d+\.\d+\n*)" };
-    for (const auto& url : GetBackendUrlsInOrder()) {
-        auto Response = Http::GET(url + "/v/s");
-        bool Matches = std::regex_match(Response, VersionRegex);
-        if (Matches) {
-            auto MyVersion = ServerVersion();
-            auto RemoteVersion = Version(VersionStrToInts(Response));
-            if (IsOutdated(MyVersion, RemoteVersion)) {
-                std::string RealVersionString = std::string("v") + RemoteVersion.AsString();
-                const std::string DefaultUpdateMsg = "NEW VERSION IS OUT! Please update to the new version ({}) of the BeamMP-Server! Download it here: https://beammp.com/! For a guide on how to update, visit: https://docs.beammp.com/server/server-maintenance/#updating-the-server";
-                auto UpdateMsg = Env::Get(Env::Key::PROVIDER_UPDATE_MESSAGE).value_or(DefaultUpdateMsg);
-                UpdateMsg = fmt::vformat(std::string_view(UpdateMsg), fmt::make_format_args(RealVersionString));
-                beammp_warnf("{}{}{}", ANSI_YELLOW_BOLD, UpdateMsg, ANSI_RESET);
-            } else {
-                if (FirstTime) {
-                    beammp_info("Server up-to-date!");
-                }
-            }
-            Application::SetSubsystemStatus("UpdateCheck", Application::Status::Good);
-            break;
-        } else {
-            if (FirstTime) {
-                beammp_debug("Failed to fetch version from: " + url);
-                beammp_trace("got " + Response);
-                Application::SetSubsystemStatus("UpdateCheck", Application::Status::Bad);
-            }
-        }
-    }
-    if (Application::GetSubsystemStatuses().at("UpdateCheck") == Application::Status::Bad) {
-        if (FirstTime) {
-            beammp_warn("Unable to fetch version info from backend.");
-        }
-    }
-    FirstTime = false;
+    // LAN-only build: no backend, so there is nothing to check against. Mark the
+    // subsystem healthy and return without making any network requests.
+    Application::SetSubsystemStatus("UpdateCheck", Application::Status::Good);
 }
 
 // thread name stuff
@@ -392,16 +359,25 @@ std::string LowerString(std::string str) {
 }
 
 
-static constexpr size_t STARTING_MAX_DECOMPRESSION_BUFFER_SIZE = 15 * 1024 * 1024;
 static constexpr size_t MAX_DECOMPRESSION_BUFFER_SIZE = 30 * 1024 * 1024;
 
 std::vector<uint8_t> DeComp(std::span<const uint8_t> input) {
     beammp_debugf("got {} bytes of input data", input.size());
 
-    // start with a decompression buffer of 5x the input size, clamped to a maximum of 15 MB.
-    // this buffer can and will grow, but we don't want to start it too large. A 5x compression ratio
-    // is pretty optimistic.
-    std::vector<uint8_t> output_buffer(std::min<size_t>(input.size() * 5, STARTING_MAX_DECOMPRESSION_BUFFER_SIZE));
+    // Pre-size the buffer for the realistic worst case so we don't do the fail-then-retry dance on
+    // large payloads. The big payloads here are vehicle CONFIGS (JSON partTrees) which compress
+    // ~10-20x; the old 5x estimate (clamped to 15 MB) undershot a complex vehicle's config and
+    // logged "zlib uncompress() failed, trying with a larger buffer" (a wasted decompress attempt
+    // that lands on the host in --combined). 16x covers the common case in one shot; the loop below
+    // still grows up to MAX for anything bigger, and rejects > MAX as a zip-bomb guard.
+    if (input.empty()) {
+        // An empty body (e.g. a bare 4-byte "ABG:" frame with nothing after the prefix) sizes
+        // output_buffer to 0; zlib then returns Z_BUF_ERROR forever while the 0*2 grow stays 0 and the
+        // >=MAX guard is false -> a CPU-spinning infinite loop. Any peer could wedge a server thread
+        // this way (a buggy/malicious mod, or mere network corruption). Reject empty input up front.
+        return {};
+    }
+    std::vector<uint8_t> output_buffer(std::min<size_t>(input.size() * 16, MAX_DECOMPRESSION_BUFFER_SIZE));
 
     uLongf output_size = output_buffer.size();
 
@@ -420,8 +396,12 @@ std::vector<uint8_t> DeComp(std::span<const uint8_t> input) {
             if (output_buffer.size() >= MAX_DECOMPRESSION_BUFFER_SIZE) {
                 throw std::runtime_error(fmt::format("decompressed packet size of {} bytes exceeded", MAX_DECOMPRESSION_BUFFER_SIZE));
             }
-            // if decompression fails, we double the buffer size (up to the allowed limit) and try again
-            output_buffer.resize(std::max<size_t>(output_buffer.size() * 2, MAX_DECOMPRESSION_BUFFER_SIZE));
+            // if decompression fails, we double the buffer size (CAPPED at the allowed limit) and try
+            // again. Must be std::min: std::max(size*2, MAX) always jumps straight to the 30MB cap on
+            // the first retry (size*2 is ~always < MAX), so every under-sized packet -- in the combined
+            // host, in-process -- allocated the full 30MB instead of doubling. The >= MAX guard above
+            // still terminates the loop, so capping here is safe.
+            output_buffer.resize(std::min<size_t>(output_buffer.size() * 2, MAX_DECOMPRESSION_BUFFER_SIZE));
             beammp_warnf("zlib uncompress() failed, trying with a larger buffer size of {}", output_buffer.size());
             output_size = output_buffer.size();
         } else if (res != Z_OK) {

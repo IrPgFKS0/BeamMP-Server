@@ -84,6 +84,7 @@ set(PRJ_SOURCES
     src/ChronoWrapper.cpp
     src/TConnectionLimiter.cpp
     src/TLuaResult.cpp
+    src/ServerRuntime.cpp
 )
 
 find_package(Lua REQUIRED)
@@ -221,6 +222,18 @@ endif(MSVC)
 
 # setup all warnings (from cmake/CompilerWarnings.cmake)
 set_project_warnings(${PROJECT_NAME})
+
+# --- Embeddable server library (parallel artifact for the LAN combined-host build) ---
+# All server sources (PRJ_SOURCES = everything except main()) compiled as a static library so
+# the LAN launcher can link the entire server in-process and drive a host client over an
+# in-memory channel. Mirrors the executable's compile settings; the standalone BeamMP-Server
+# exe above is unchanged. Global add_compile_* (bigobj, _WIN32_WINNT, MSVC MT runtime) already
+# apply to all targets including this one.
+add_library(beammp_server_lib STATIC ${PRJ_HEADERS} ${PRJ_SOURCES})
+target_include_directories(beammp_server_lib PUBLIC include ${PRJ_INCLUDE_DIRS})
+target_link_libraries(beammp_server_lib PUBLIC ${PRJ_LIBRARIES})
+target_compile_features(beammp_server_lib PUBLIC ${PRJ_COMPILE_FEATURES})
+target_compile_definitions(beammp_server_lib PUBLIC ${PRJ_DEFINITIONS} DOCTEST_CONFIG_DISABLE)
 
 if(${PROJECT_NAME}_ENABLE_UNIT_TESTING)
     message(STATUS "Unit tests are enabled and will be built as '${PROJECT_NAME}-tests'")

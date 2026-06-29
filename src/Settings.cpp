@@ -23,19 +23,21 @@ Settings::Settings() {
         // All entries which contain std::strings must be explicitly constructed, otherwise they become 'bool'
         { General_Description, std::string("BeamMP Default Description") },
         { General_Tags, std::string("Freeroam") },
-        { General_MaxPlayers, 8 },
-        { General_Name, std::string("BeamMP Server") },
+        { General_MaxPlayers, 10 },
+        { General_Name, std::string("LAN Server") },
         { General_Map, std::string("/levels/gridmap_v2/info.json") },
         { General_AuthKey, std::string("") },
         { General_Private, true },
         { General_IP, "::"},
         { General_Port, 30814 },
-        { General_MaxCars, 1 },
+        { General_MaxCars, 4 },
         { General_LogChat, true },
         { General_ResourceFolder, std::string("Resources") },
         { General_Debug, false },
         { General_AllowGuests, true },
         { General_InformationPacket, true },
+        { General_AdminName, std::string("") },
+        { General_AllowLoopbackAdmin, true },
         { Misc_ImScaredOfUpdates, true },
         { Misc_UpdateReminderTime, "30s" }
     };
@@ -56,6 +58,8 @@ Settings::Settings() {
         { { "General", "Debug" }, { General_Debug, READ_WRITE } },
         { { "General", "AllowGuests" }, { General_AllowGuests, READ_WRITE } },
         { { "General", "InformationPacket" }, { General_InformationPacket, READ_WRITE } },
+        { { "General", "AdminName" }, { General_AdminName, READ_WRITE } },
+        { { "General", "AllowLoopbackAdmin" }, { General_AllowLoopbackAdmin, READ_WRITE } },
         { { "Misc", "ImScaredOfUpdates" }, { Misc_ImScaredOfUpdates, READ_WRITE } },
         { { "Misc", "UpdateReminderTime" }, { Misc_UpdateReminderTime, READ_WRITE } }
     };

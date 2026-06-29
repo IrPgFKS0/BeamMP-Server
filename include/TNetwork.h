@@ -42,8 +42,17 @@ public:
     [[nodiscard]] bool SyncClient(const std::weak_ptr<TClient>& c);
     void Identify(TConnection&& client, TConnectionLimiter::TGuard&&);
     std::shared_ptr<TClient> Authentication(TConnection&& ClientConnection);
+    // Shared auth/sync body used by both Authentication() (socket clients) and AddVirtualClient().
+    std::shared_ptr<TClient> AuthenticationImpl(std::shared_ptr<TClient> Client, const std::string& ip);
+    // Combined-host: create + run a socketless (in-memory) virtual client through the normal
+    // auth/sync flow. The returned client's Link() is the in-memory channel the launcher's
+    // host-mode loop drives. See InMemoryLink.
+    std::shared_ptr<TClient> AddVirtualClient();
     void SyncResources(TClient& c);
     [[nodiscard]] bool UDPSend(TClient& Client, std::vector<uint8_t> Data);
+    // Combined-host: feed a virtual (in-memory) client's incoming UDP payload through the normal
+    // parser. Called by the launcher's host-mode drain (Stage 4). See InMemoryLink.
+    void HandleVirtualUDP(std::weak_ptr<TClient> Client, std::vector<uint8_t> Data);
     void SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self, bool Rel);
     void UpdatePlayer(TClient& Client);
     boost::system::error_code ReadWithTimeout(boost::asio::ip::tcp::socket& Socket, void* Buf, size_t Len, std::chrono::steady_clock::duration Timeout);

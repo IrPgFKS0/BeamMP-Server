@@ -20,6 +20,7 @@
 
 #include "Common.h"
 #include <nlohmann/json.hpp>
+#include <unordered_map>
 
 class TResourceManager {
 public:
@@ -31,6 +32,11 @@ public:
     [[nodiscard]] std::string FileSizes() const { return mFileSizes; }
     [[nodiscard]] int ModsLoaded() const { return mModsLoaded; }
     [[nodiscard]] nlohmann::json GetMods() const { return mMods; }
+
+    // LAN: mods may live in named subfolders of Resources/Client (for
+    // organization). Clients still request a bare filename, so resolve it to the
+    // real on-disk path. Returns "" if the mod is not known.
+    [[nodiscard]] std::string PathForMod(const std::string& FileName);
 
     void RefreshFiles();
     void SetProtected(const std::string& ModName, bool Protected);
@@ -44,4 +50,6 @@ private:
 
     std::mutex mModsMutex;
     nlohmann::json mMods = nlohmann::json::array();
+    // filename (e.g. "foo.zip") -> full path (may be inside a subfolder)
+    std::unordered_map<std::string, std::string> mModPaths;
 };
