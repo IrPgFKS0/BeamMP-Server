@@ -186,47 +186,37 @@ void TNetwork::UDPServerMain() {
                 continue;
             }
             uint8_t ID = uint8_t(Data.at(0)) - 1;
-            mServer.ForEachClient([&](std::weak_ptr<TClient> ClientPtr) -> bool {
-                std::shared_ptr<TClient> Client;
-                {
-                    ReadLock Lock(mServer.GetClientMutex());
-                    if (auto Locked = ClientPtr.lock()) {
-                        Client = std::move(Locked);
-                    } else
-                        return true;
+            // O(1) sender lookup via the id-indexed snapshot -- no whole-set copy/scan, no client mutex
+            // on the hot path. An expired/absent id yields a null slot -> packet is simply dropped.
+            std::shared_ptr<TClient> Client;
+            {
+                auto Lookup = mServer.GetClientLookup();
+                if (Lookup && static_cast<size_t>(ID) < Lookup->size()) {
+                    Client = (*Lookup)[static_cast<size_t>(ID)];
                 }
-
-                if (Client->GetID() == ID) {
-                    if (Client->GetUDPAddr() == boost::asio::ip::udp::endpoint { } && !Client->IsUDPConnected() && !Client->GetMagic().empty()) {
-                        if (Data.size() != 66) {
-                            beammp_debugf("Invalid size for UDP value. IP: {} ID: {}", remote_client_ep.address().to_string(), ID);
-                            return false;
-                        }
-
+            }
+            if (Client) {
+                if (Client->GetUDPAddr() == boost::asio::ip::udp::endpoint { } && !Client->IsUDPConnected() && !Client->GetMagic().empty()) {
+                    // First UDP packet from this client: the magic handshake that binds its UDP endpoint.
+                    if (Data.size() != 66) {
+                        beammp_debugf("Invalid size for UDP value. IP: {} ID: {}", remote_client_ep.address().to_string(), ID);
+                    } else {
                         const std::vector Magic(Data.begin() + 2, Data.end());
-
                         if (Magic != Client->GetMagic()) {
                             beammp_debugf("Invalid value for UDP IP: {} ID: {}", remote_client_ep.address().to_string(), ID);
-                            return false;
+                        } else {
+                            Client->SetMagic({ });
+                            Client->SetUDPAddr(remote_client_ep);
+                            Client->SetIsUDPConnected(true);
                         }
-
-                        Client->SetMagic({ });
-                        Client->SetUDPAddr(remote_client_ep);
-                        Client->SetIsUDPConnected(true);
-                        return false;
                     }
-
-                    if (Client->GetUDPAddr() == remote_client_ep) {
-                        Data.erase(Data.begin(), Data.begin() + 2);
-                        mServer.GlobalParser(ClientPtr, std::move(Data), mPPSMonitor, *this, true);
-                    } else {
-                        beammp_debugf("Ignored UDP packet for Client {} due to remote address mismatch. Source: {}, Client: {}", ID, remote_client_ep.address().to_string(), Client->GetUDPAddr().address().to_string());
-                        return false;
-                    }
+                } else if (Client->GetUDPAddr() == remote_client_ep) {
+                    Data.erase(Data.begin(), Data.begin() + 2);
+                    mServer.GlobalParser(Client, std::move(Data), mPPSMonitor, *this, true);
+                } else {
+                    beammp_debugf("Ignored UDP packet for Client {} due to remote address mismatch. Source: {}, Client: {}", ID, remote_client_ep.address().to_string(), Client->GetUDPAddr().address().to_string());
                 }
-
-                return true;
-            });
+            }
         } catch (const std::exception& e) {
             beammp_warnf("Failed to receive/parse packet via UDP: {}", e.what());
         }
@@ -1100,6 +1090,7 @@ void TNetwork::OnConnect(const std::weak_ptr<TClient>& c) {
     }
     beammp_info("Client connected");
     LockedClient->SetID(OpenID());
+    mServer.RefreshClientLookup(); // index the just-assigned id so the O(1) UDP lookup can find this client
     beammp_info("Assigned ID " + std::to_string(LockedClient->GetID()) + " to " + LockedClient->GetName());
     LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onPlayerConnecting", "", LockedClient->GetID()));
     SyncResources(*LockedClient);
@@ -1427,39 +1418,37 @@ void TNetwork::SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self
     }
     char C = Data.at(0);
     bool ret = true;
-    mServer.ForEachClient([&](std::weak_ptr<TClient> ClientPtr) -> bool {
-        std::shared_ptr<TClient> Client { nullptr };
-        {
-            ReadLock Lock(mServer.GetClientMutex());
-            if (auto Locked = ClientPtr.lock()) {
-                Client = std::move(Locked);
-            } else {
-                return true;
+    // Fan out over the id-indexed snapshot (immutable) instead of copying the whole client set under
+    // the client mutex per broadcast. Identical per-client logic; null slots (unused ids) are skipped.
+    auto Lookup = mServer.GetClientLookup();
+    if (Lookup) {
+        for (const auto& Client : *Lookup) {
+            if (!Client) {
+                continue;
             }
-        }
-        if (Self || Client.get() != c) {
-            if (Client->IsSynced() || Client->IsSyncing()) {
-                if (Rel || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || compressBound(Data.size()) > 1024) {
-                    if (C == 'O' || C == 'T' || Data.size() > 1000) {
-                        if (Data.size() > 400) {
-                            auto CompressedData = Data;
-                            CompressProperly(CompressedData);
-                            Client->EnqueuePacket(CompressedData);
+            if (Self || Client.get() != c) {
+                if (Client->IsSynced() || Client->IsSyncing()) {
+                    if (Rel || C == 'W' || C == 'Y' || C == 'V' || C == 'E' || compressBound(Data.size()) > 1024) {
+                        if (C == 'O' || C == 'T' || Data.size() > 1000) {
+                            if (Data.size() > 400) {
+                                auto CompressedData = Data;
+                                CompressProperly(CompressedData);
+                                Client->EnqueuePacket(CompressedData);
+                            } else {
+                                Client->EnqueuePacket(Data);
+                            }
+                            // ret = SendLarge(*Client, Data);
                         } else {
                             Client->EnqueuePacket(Data);
+                            // ret = TCPSend(*Client, Data);
                         }
-                        // ret = SendLarge(*Client, Data);
                     } else {
-                        Client->EnqueuePacket(Data);
-                        // ret = TCPSend(*Client, Data);
+                        ret = UDPSend(*Client, Data);
                     }
-                } else {
-                    ret = UDPSend(*Client, Data);
                 }
             }
         }
-        return true;
-    });
+    }
     if (!ret) {
         // TODO: handle
     }

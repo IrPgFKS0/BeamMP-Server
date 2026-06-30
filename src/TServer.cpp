@@ -143,8 +143,11 @@ void TServer::RemoveClient(const std::weak_ptr<TClient>& WeakClientPtr) {
     TClient& Client = *LockedClientPtr;
     beammp_debug("removing client " + Client.GetName() + " (" + std::to_string(ClientCount()) + ")");
     Client.ClearCars();
-    WriteLock Lock(mClientsMutex);
-    mClients.erase(LockedClientPtr);
+    {
+        WriteLock Lock(mClientsMutex);
+        mClients.erase(LockedClientPtr);
+    }
+    RefreshClientLookup(); // drop the departed client from the id-indexed hot-path snapshot
 }
 
 void TServer::ForEachClient(const std::function<bool(std::weak_ptr<TClient>)>& Fn) {
@@ -715,8 +718,41 @@ void TServer::Apply(TClient& c, int VID, const std::string& pckt) {
 
 void TServer::InsertClient(const std::shared_ptr<TClient>& NewClient) {
     beammp_debug("inserting client (" + std::to_string(ClientCount()) + ")");
-    WriteLock Lock(mClientsMutex); // TODO why is there 30+ threads locked here
-    (void)mClients.insert(NewClient);
+    {
+        WriteLock Lock(mClientsMutex); // TODO why is there 30+ threads locked here
+        (void)mClients.insert(NewClient);
+    }
+    RefreshClientLookup(); // rebuild the id-indexed hot-path snapshot (lock released first -- it takes its own ReadLock)
+}
+
+// Rebuild the id-indexed client snapshot from mClients and publish it atomically. Called on every
+// membership/ID change (InsertClient, RemoveClient, and right after SetID in OnConnect). O(clients),
+// but only on join/leave/ID-assign -- never on the per-packet hot path.
+void TServer::RefreshClientLookup() {
+    auto Snapshot = std::make_shared<TClientLookup>();
+    {
+        ReadLock Lock(mClientsMutex);
+        for (const auto& Client : mClients) {
+            if (!Client) {
+                continue;
+            }
+            const int ID = Client->GetID();
+            if (ID < 0) {
+                continue; // not assigned yet (mID defaults to -1); a later refresh after SetID catches it
+            }
+            if (static_cast<size_t>(ID) >= Snapshot->size()) {
+                Snapshot->resize(static_cast<size_t>(ID) + 1);
+            }
+            (*Snapshot)[static_cast<size_t>(ID)] = Client;
+        }
+    }
+    std::lock_guard<std::mutex> Lock(mClientLookupMutex);
+    mClientLookup = std::move(Snapshot);
+}
+
+std::shared_ptr<const TServer::TClientLookup> TServer::GetClientLookup() const {
+    std::lock_guard<std::mutex> Lock(mClientLookupMutex);
+    return mClientLookup;
 }
 
 struct PidVidData {

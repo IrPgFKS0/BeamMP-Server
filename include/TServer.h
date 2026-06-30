@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #include "BoostAliases.h"
 
@@ -45,6 +46,15 @@ public:
     // in Fn, return true to continue, return false to break
     void ForEachClient(const std::function<bool(std::weak_ptr<TClient>)>& Fn);
     size_t ClientCount() const;
+
+    // O(1), id-indexed lock-free snapshot of connected clients for the hot relay path. The UDP ingress
+    // used to copy + linear-scan the WHOLE client set (under the global client mutex) once to find the
+    // sender and again per broadcast; this replaces that with an immutable vector indexed by client id
+    // (small/dense via OpenID(); null slots are gaps). Readers atomically grab the current snapshot and
+    // iterate it without touching the client set or its mutex. Rebuilt on every join/leave/ID assignment.
+    using TClientLookup = std::vector<std::shared_ptr<TClient>>;
+    std::shared_ptr<const TClientLookup> GetClientLookup() const;
+    void RefreshClientLookup();
 
     void GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uint8_t>&& Packet, TPPSMonitor& PPSMonitor, TNetwork& Network, bool udp);
     static void HandleEvent(TClient& c, const std::string& Data);
@@ -65,6 +75,8 @@ private:
     TIoPollThread mIoCtxPoller;
     TClientSet mClients;
     mutable RWMutex mClientsMutex;
+    std::shared_ptr<const TClientLookup> mClientLookup; // id-indexed snapshot; see GetClientLookup()
+    mutable std::mutex mClientLookupMutex;              // guards ONLY the mClientLookup pointer swap/copy (cheap), NOT the client set
     std::atomic<uint32_t> mMapGeneration { 0 };
     static void ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Network);
     static bool ShouldSpawn(TClient& c, const std::string& CarJson, int ID);
