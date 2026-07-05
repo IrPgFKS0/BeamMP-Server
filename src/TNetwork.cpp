@@ -1356,7 +1356,10 @@ bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {
 }
 
 std::vector<uint8_t> TNetwork::UDPRcvFromClient(boost::asio::ip::udp::endpoint& ClientEndpoint) {
-    std::array<char, 1024> Ret { };
+    // Sized to the UDP maximum: recvfrom() truncates a datagram that exceeds the buffer
+    // (the tail is silently lost). A compressed position packet from a client with several
+    // moving vehicles can exceed 1024 bytes, so such updates were silently dropped.
+    std::array<char, 65535> Ret { };
     boost::system::error_code ec;
     const auto Rcv = mUDPSock.receive_from(boost::asio::mutable_buffer(Ret.data(), Ret.size()), ClientEndpoint, 0, ec);
     if (ec) {
