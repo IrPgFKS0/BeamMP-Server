@@ -1,5 +1,18 @@
 # BeamMP-Server
 
+> ### ⚠️ This is the **LAN-only fork** of the BeamMP server (branch `lan`)
+> Modified to run without the BeamMP backend (no heartbeat/auth keys), plus LAN
+> fixes/features: per-client TCP send serialization, O(1) UDP relay lookup, per-join
+> mod-list refresh, seamless in-place map switching, and an embeddable build
+> (`ServerRuntime`) that the combined host exe links in. Docs, prebuilt binaries and
+> the build scripts live in the fork's main repo:
+> **[IrPgFKS0/BeamMP](https://github.com/IrPgFKS0/BeamMP/tree/lan)** →
+> [`docs/lan/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/docs/lan) (setup/tuning),
+> [`dist/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/dist) (release zip),
+> [`tools/`](https://github.com/IrPgFKS0/BeamMP/tree/lan/tools) (build/host scripts —
+> `build-server.bat` builds this repo from a sibling checkout).
+> The sections below are inherited from upstream BeamMP.
+
 [![CMake Windows Build](https://github.com/BeamMP/BeamMP-Server/workflows/CMake%20Windows%20Build/badge.svg?branch=master)](https://github.com/BeamMP/BeamMP-Server/actions?query=workflow%3A%22CMake+Windows+Build%22)
 [![CMake Linux Build](https://github.com/BeamMP/BeamMP-Server/workflows/CMake%20Linux%20Build/badge.svg?branch=master)](https://github.com/BeamMP/BeamMP-Server/actions?query=workflow%3A%22CMake+Linux+Build%22)
 
