@@ -922,6 +922,8 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
     });
     MPTable.set_function("TriggerClientEvent", &LuaAPI::MP::TriggerClientEvent);
     MPTable.set_function("TriggerClientEventJson", &LuaAPI::MP::TriggerClientEventJson);
+    MPTable.set_function("TriggerClientEventUnreliable", &LuaAPI::MP::TriggerClientEventUnreliable); // BeamMP#493
+    MPTable.set_function("TriggerClientEventJsonUnreliable", &LuaAPI::MP::TriggerClientEventJsonUnreliable);
     MPTable.set_function("ChangeMap", &LuaAPI::MP::ChangeMap);
     MPTable.set_function("GetPlayerCount", &LuaAPI::MP::GetPlayerCount);
     MPTable.set_function("IsPlayerConnected", &LuaAPI::MP::IsPlayerConnected);

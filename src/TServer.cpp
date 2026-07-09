@@ -367,6 +367,11 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             beammp_debugf("Received 'E' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
             return;
         }
+        // 'E' (reliable) and 'e' (unreliable/UDP, BeamMP#493) both dispatch through HandleEvent; the
+        // difference is only the transport a client used to send it (reliable 'E' over UDP is dropped
+        // above, but 'e' is accepted over either).
+        [[fallthrough]];
+    case 'e':
         HandleEvent(*LockedClient, StringPacket);
         return;
     case 'N':

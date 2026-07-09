@@ -136,10 +136,12 @@ TEST_CASE("LuaAPI::MP::GetServerVersion") {
     CHECK(pa == real.patch);
 }
 
-static inline std::pair<bool, std::string> InternalTriggerClientEvent(int PlayerID, const std::string& EventName, const std::string& Data) {
-    std::string Packet = "E:" + EventName + ":" + Data;
+static inline std::pair<bool, std::string> InternalTriggerClientEvent(int PlayerID, const std::string& EventName, const std::string& Data, bool Rel) {
+    // Opt-in unreliable (UDP) events (BeamMP-Server#493): uppercase "E:" = reliable/TCP, lowercase
+    // "e:" = unreliable/UDP. `Rel` is threaded down into SendToAll/Respond which choose the transport.
+    std::string Packet = std::string(Rel ? "E:" : "e:") + EventName + ":" + Data;
     if (PlayerID == -1) {
-        LuaAPI::MP::Engine->Network().SendToAll(nullptr, StringToVector(Packet), true, true);
+        LuaAPI::MP::Engine->Network().SendToAll(nullptr, StringToVector(Packet), true, Rel);
         return { true, "" };
     } else {
         auto MaybeClient = GetClient(LuaAPI::MP::Engine->Server(), PlayerID);
@@ -149,7 +151,7 @@ static inline std::pair<bool, std::string> InternalTriggerClientEvent(int Player
                     return { false, "Player hasn't joined yet" };
                 }
 
-                if (!LuaAPI::MP::Engine->Network().Respond(*c, StringToVector(Packet), true)) {
+                if (!LuaAPI::MP::Engine->Network().Respond(*c, StringToVector(Packet), Rel)) {
                     beammp_lua_errorf("Respond failed, dropping client {}", PlayerID);
                     LuaAPI::MP::Engine->Network().ClientKick(*c, "Disconnected after failing to receive packets");
                     return { false, "Respond failed, dropping client" };
@@ -165,7 +167,12 @@ static inline std::pair<bool, std::string> InternalTriggerClientEvent(int Player
 
 std::pair<bool, std::string> LuaAPI::MP::TriggerClientEvent(int PlayerID, const std::string& EventName, const sol::object& DataObj) {
     std::string Data = DataObj.as<std::string>();
-    return InternalTriggerClientEvent(PlayerID, EventName, Data);
+    return InternalTriggerClientEvent(PlayerID, EventName, Data, true);
+}
+
+std::pair<bool, std::string> LuaAPI::MP::TriggerClientEventUnreliable(int PlayerID, const std::string& EventName, const sol::object& DataObj) {
+    std::string Data = DataObj.as<std::string>();
+    return InternalTriggerClientEvent(PlayerID, EventName, Data, false);
 }
 
 uint32_t LuaAPI::MP::ChangeMap(const std::string& MapPath) {
@@ -872,5 +879,9 @@ std::string LuaAPI::MP::JsonUnflatten(const std::string& json) {
 }
 
 std::pair<bool, std::string> LuaAPI::MP::TriggerClientEventJson(int PlayerID, const std::string& EventName, const sol::table& Data) {
-    return InternalTriggerClientEvent(PlayerID, EventName, JsonEncode(Data));
+    return InternalTriggerClientEvent(PlayerID, EventName, JsonEncode(Data), true);
+}
+
+std::pair<bool, std::string> LuaAPI::MP::TriggerClientEventJsonUnreliable(int PlayerID, const std::string& EventName, const sol::table& Data) {
+    return InternalTriggerClientEvent(PlayerID, EventName, JsonEncode(Data), false);
 }

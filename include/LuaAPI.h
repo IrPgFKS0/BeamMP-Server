@@ -32,6 +32,8 @@ namespace MP {
     std::tuple<int, int, int> GetServerVersion();
     std::pair<bool, std::string> TriggerClientEvent(int PlayerID, const std::string& EventName, const sol::object& Data);
     std::pair<bool, std::string> TriggerClientEventJson(int PlayerID, const std::string& EventName, const sol::table& Data);
+    std::pair<bool, std::string> TriggerClientEventUnreliable(int PlayerID, const std::string& EventName, const sol::object& Data); // BeamMP#493: UDP variant
+    std::pair<bool, std::string> TriggerClientEventJsonUnreliable(int PlayerID, const std::string& EventName, const sol::table& Data);
     inline size_t GetPlayerCount() { return Engine->Server().ClientCount(); }
     // Seamless map switch: set the map and coordinate every connected client to load it
     // without a reconnect/Lua reload (see TServer::ChangeMap). Returns the new generation.
