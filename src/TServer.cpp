@@ -123,6 +123,12 @@ TEST_CASE("GetPidVid") {
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
     beammp_info("BeamMP Server v" + Application::ServerVersionString());
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
+    std::mt19937_64 TimeSyncRandomDevice(std::random_device{}());
+
+    TimeSyncStart = std::chrono::steady_clock::now()
+        - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(std::uniform_real_distribution<double>(0.0, 2592000.0)(TimeSyncRandomDevice))
+        );
     Application::SetSubsystemStatus("Server", Application::Status::Good);
 }
 
@@ -155,13 +161,6 @@ size_t TServer::ClientCount() const {
     ReadLock Lock(mClientsMutex);
     return mClients.size();
 }
-
-std::mt19937_64 TimeSyncRandomDevice(std::random_device{}());
-
-auto TimeSyncStart = std::chrono::steady_clock::now()
-    - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::duration<double>(std::uniform_real_distribution<double>(0.0, 2592000.0)(TimeSyncRandomDevice))
-    );
 
 void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uint8_t>&& Packet, TPPSMonitor& PPSMonitor, TNetwork& Network, bool udp) {
     constexpr std::string_view ABG = "ABG:";
@@ -219,7 +218,7 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
     switch (Code) {
     case 't':
         if (!udp && Packet.size() == 9) {
-            uint64_t Time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - TimeSyncStart).count();
+            auto Time = GetServerTimeMS();
 
             std::vector<uint8_t> ServerTime(sizeof(uint64_t));
             std::memcpy(ServerTime.data(), &Time, sizeof(uint64_t));
