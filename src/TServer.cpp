@@ -127,7 +127,7 @@ TServer::TServer(const std::vector<std::string_view>& Arguments) {
 
     TimeSyncStart = std::chrono::steady_clock::now()
         - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(std::uniform_real_distribution<double>(0.0, 2592000.0)(TimeSyncRandomDevice))
+            std::chrono::duration<double>(std::uniform_real_distribution<double>(0.0, 86400.0)(TimeSyncRandomDevice)) //2592000
         );
     Application::SetSubsystemStatus("Server", Application::Status::Good);
 }

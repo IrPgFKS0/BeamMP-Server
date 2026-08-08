@@ -54,6 +54,7 @@ public:
     io_context& IoCtx() { return mIoCtxPoller.IoCtx(); }
 
     uint64_t GetServerTimeMS() const { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - TimeSyncStart).count();}
+    double GetServerTime() const { return std::chrono::duration<double>(std::chrono::steady_clock::now() - TimeSyncStart).count(); }
 private:
     std::chrono::time_point<std::chrono::steady_clock> TimeSyncStart;
     TIoPollThread mIoCtxPoller;
