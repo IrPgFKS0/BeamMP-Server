@@ -1016,8 +1016,8 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
         return make_object(sol::state_view(ts), this->mEngine->Server().GetServerTimeMS());
     });
 
-    MPTable.set_function("GetServerTime", [this] {
-        return this->mEngine->Server().GetServerTime();
+    MPTable.set_function("GetServerTime", [this](const sol::this_state ts) {
+        return make_object(sol::state_view(ts), this->mEngine->Server().GetServerTime());
     });
 
     auto UtilTable = StateView.create_named_table("Util");
