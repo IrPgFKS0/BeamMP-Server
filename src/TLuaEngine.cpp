@@ -1012,6 +1012,14 @@ TLuaEngine::StateThreadData::StateThreadData(const std::string& Name, TLuaStateI
     }
     MPTable.set_function("Get", &LuaAPI::MP::Get);
 
+    MPTable.set_function("GetServerTimeMS", [this](const sol::this_state ts) {
+        return make_object(sol::state_view(ts), this->mEngine->Server().GetServerTimeMS());
+    });
+
+    MPTable.set_function("GetServerTime", [this](const sol::this_state ts) {
+        return make_object(sol::state_view(ts), this->mEngine->Server().GetServerTime());
+    });
+
     auto UtilTable = StateView.create_named_table("Util");
     UtilTable.set_function("LogDebug", [this](sol::variadic_args args) {
         std::string ToPrint = "";
