@@ -132,6 +132,12 @@ TEST_CASE("GetPidVid") {
 TServer::TServer(const std::vector<std::string_view>& Arguments) {
     beammp_info("BeamMP LAN Server v" + Application::ServerVersionString());
     Application::SetSubsystemStatus("Server", Application::Status::Starting);
+    std::mt19937_64 TimeSyncRandomDevice(std::random_device{}());
+
+    TimeSyncStart = std::chrono::steady_clock::now()
+        - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(std::uniform_real_distribution<double>(0.0, 2592000.0)(TimeSyncRandomDevice))
+        );
     Application::SetSubsystemStatus("Server", Application::Status::Good);
 }
 
@@ -281,6 +287,24 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         return;
     }
     switch (Code) {
+    case 't':
+        if (!udp && Packet.size() == 9) {
+            auto Time = GetServerTimeMS();
+
+            std::vector<uint8_t> ServerTime(sizeof(uint64_t));
+            std::memcpy(ServerTime.data(), &Time, sizeof(uint64_t));
+
+            auto Data = Packet;
+
+            beammp_debugf("Sending server time {} to client  '{}' ({}), client time: {}", Time, LockedClient->GetName(), LockedClient->GetID(), reinterpret_cast<uint64_t>(Data.data()));
+
+            Data.insert(Data.end(), ServerTime.begin(), ServerTime.end());
+
+            if (!Network.Respond(*LockedClient, Data, true)) {
+                Network.DisconnectClient(*LockedClient, "Failed to send time");
+            }
+        }
+        return;
     case 'H': // initial connection
         if (udp) {
             beammp_debugf("Received 'H' packet over UDP from client '{}' ({}), ignoring it", LockedClient->GetName(), LockedClient->GetID());
