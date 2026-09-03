@@ -129,7 +129,7 @@ private:
     static inline std::mutex mShutdownHandlersMutex {};
     static inline std::deque<TShutdownHandler> mShutdownHandlers {};
 
-    static inline Version mVersion { 3, 9, 3 };
+    static inline Version mVersion { 3, 9, 4 };
 };
 
 /// Used to static_assert in std::visit
