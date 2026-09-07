@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#include <cstdlib> // std::_Exit (PR #501 shutdown)
 #include "Common.h"
 
 #include "Env.h"
@@ -67,7 +68,18 @@ void Application::GracefullyShutdown() {
         beammp_info("Subsystem " + std::to_string(i + 1) + "/" + std::to_string(mShutdownHandlers.size()) + " shutting down");
         mShutdownHandlers[i]();
     }
-    // std::exit(-1);
+    // Upstream PR #501 (issue #491): every subsystem has stopped, but a lingering non-daemon
+    // thread or a static destructor could still hang the process here, leaving a server that
+    // "shut down" but never exits. _Exit skips atexit handlers and static destructors on purpose
+    // -- that is what makes it immune to those hangs.
+    //
+    // FORK GUARD: only for the STANDALONE server. In combined-host mode the server is a library
+    // inside the launcher process, so exiting here would kill the launcher (and the player's
+    // game session) along with it -- the launcher owns that lifecycle. Same reasoning as the
+    // hard-shutdown guard above.
+    if (!Application::IsEmbedded()) {
+        std::_Exit(0);
+    }
 }
 
 std::string Application::ServerVersionString() {

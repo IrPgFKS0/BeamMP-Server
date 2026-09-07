@@ -707,6 +707,26 @@ std::string LuaAPI::FS::ConcatPaths(sol::variadic_args Args) {
     return Result;
 }
 
+// Upstream PR #454. A Lua table is a JSON ARRAY only when every key is an integer >= 1. The old
+// test accepted any NUMBER key, so {[0]="a",[1]=true} encoded as the bare array ["a",true] -- the
+// 0 key silently vanished, because the array branch push_back()es values and drops keys entirely.
+// Zero, negative and fractional keys hit the same hole. Exposed to server Lua plugins as
+// Util.JsonEncode, so a plugin could lose data with no error.
+static bool IsLuaArray(const sol::table& table) {
+    for (const auto& pair : table) {
+        if (pair.first.get_type() != sol::type::number) {
+            return false;
+        }
+        if (!pair.first.is<int>()) { // fractional keys are not array indices
+            return false;
+        }
+        if (pair.first.as<int>() < 1) { // Lua arrays are 1-based; 0 and negatives are map keys
+            return false;
+        }
+    }
+    return true;
+}
+
 static void JsonEncodeRecursive(nlohmann::json& json, const sol::object& left, const sol::object& right, bool is_array, size_t depth = 0) {
     if (depth > 100) {
         beammp_lua_error("json serialize will not go deeper than 100 nested tables, internal references assumed, aborted this path");
@@ -776,12 +796,7 @@ static void JsonEncodeRecursive(nlohmann::json& json, const sol::object& left, c
         if (right.as<sol::table>().empty()) {
             value = nlohmann::json::object();
         } else {
-            bool local_is_array = true;
-            for (const auto& pair : right.as<sol::table>()) {
-                if (pair.first.get_type() != sol::type::number) {
-                    local_is_array = false;
-                }
-            }
+            bool local_is_array = IsLuaArray(right.as<sol::table>());
             for (const auto& pair : right.as<sol::table>()) {
                 JsonEncodeRecursive(value, pair.first, pair.second, local_is_array, depth + 1);
             }
@@ -804,12 +819,7 @@ std::string LuaAPI::MP::JsonEncode(const sol::table& object) {
     if (object.as<sol::table>().empty()) {
         json = nlohmann::json::object();
     } else {
-        bool is_array = true;
-        for (const auto& pair : object.as<sol::table>()) {
-            if (pair.first.get_type() != sol::type::number) {
-                is_array = false;
-            }
-        }
+        bool is_array = IsLuaArray(object.as<sol::table>());
         for (const auto& entry : object) {
             JsonEncodeRecursive(json, entry.first, entry.second, is_array);
         }
