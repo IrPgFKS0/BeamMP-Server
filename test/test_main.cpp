@@ -23,6 +23,14 @@
 
 int main(int argc, char** argv) {
     doctest::Context context;
+    // This binary owns its own lifetime. Application::GracefullyShutdown (which the TLuaEngine test
+    // calls to stop the engine's threads) ends with std::_Exit(0) in STANDALONE mode (the upstream
+    // PR #501 port) -- inside doctest that terminated the run at test case 23 of 36: the 13 later
+    // cases never executed, no summary was printed, and the exit code was 0, i.e. "all passed".
+    // Embedded mode means exactly "this process is not the server's to end", which is the harness's
+    // situation, and it gates only shutdown/signals/console -- none of which the tests exercise --
+    // so reuse the author's mechanism rather than add a test-only knob.
+    Application::SetEmbedded(true);
 
     // Application::InitializeConsole();
 

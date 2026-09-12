@@ -37,6 +37,10 @@ public:
 
     // Initializes the commandline app to take over I/O
     void InitializeCommandline();
+    // Standalone server only: put the terminal back the way we found it, right before the hard
+    // exit in Application::GracefullyShutdown (see there). No-op unless the commandline library
+    // chose its interactive (raw-tty) backend for this process.
+    void RestoreTerminal();
 
     void Write(const std::string& str);
     void WriteRaw(const std::string& str);
@@ -94,6 +98,7 @@ private:
     };
 
     std::unique_ptr<Commandline> mCommandline { nullptr };
+    bool mInteractiveTerminal { false }; // the commandline lib picked its interactive backend -- see RestoreTerminal()
     std::vector<std::string> mCachedLuaHistory;
     std::vector<std::string> mCachedRegularHistory;
     TLuaEngine* mLuaEngine { nullptr };

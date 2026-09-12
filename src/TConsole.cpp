@@ -17,6 +17,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "TConsole.h"
+
+// From the vendored commandline library's PRIVATE impls.h (deps/commandline/src): these are compiled
+// into the static lib on both platforms but only declared privately. Declared here rather than adding
+// the lib's src/ to the include path or editing the submodule. On Linux reset_terminal() is a single
+// tcsetattr (async-signal-safe); on Windows both are trivial.
+namespace impl {
+bool is_interactive();
+void reset_terminal();
+}
 #include "Common.h"
 #include "Compat.h"
 
@@ -856,6 +865,21 @@ Commands
 TConsole::TConsole() {
 }
 
+void TConsole::RestoreTerminal() {
+    // The interactive backend's stdin reader parks in getchar() with ICANON and ECHO cleared and only
+    // restores them after a key; the ORIGINAL termios is restored by ~InteractiveBackend -- which the
+    // std::_Exit in GracefullyShutdown deliberately skips. So a Ctrl+C / SIGTERM / Lua exit() shutdown
+    // of the standalone Linux server left the user's shell with no echo and no line editing until
+    // `reset`. Restore it here WITHOUT destroying the backend: tcsetattr needs no thread join and is
+    // async-signal-safe, so this is correct from every path that reaches GracefullyShutdown (a signal
+    // handler, the console's own input thread on a typed `exit`, a Lua state thread, the network
+    // threads' fatal paths). Guarded on the captured decision, never on a fresh isatty() -- see
+    // InitializeCommandline().
+    if (mInteractiveTerminal) {
+        impl::reset_terminal();
+    }
+}
+
 void TConsole::InitializeCommandline() {
     if (Application::IsEmbedded()) {
         // Combined host: the launcher owns the terminal. Do NOT create the interactive commandline
@@ -864,6 +888,11 @@ void TConsole::InitializeCommandline() {
         BackupOldLog();
         return;
     }
+    // The SAME predicate Commandline's ctor evaluates to pick the interactive (raw-tty) backend,
+    // captured at the same instant, so RestoreTerminal() can never touch termios the library never
+    // saved (with the buffered backend -- e.g. stdout redirected to a file -- reset_terminal() would
+    // apply an all-zero termios to a real tty).
+    mInteractiveTerminal = impl::is_interactive();
     mCommandline = std::make_unique<Commandline>();
     mCommandline->enable_history();
     mCommandline->set_history_limit(20);

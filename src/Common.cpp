@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#include <cstdio> // std::fflush (see GracefullyShutdown)
 #include <cstdlib> // std::_Exit (PR #501 shutdown)
 #include "Common.h"
 
@@ -78,6 +79,13 @@ void Application::GracefullyShutdown() {
     // game session) along with it -- the launcher owns that lifecycle. Same reasoning as the
     // hard-shutdown guard above.
     if (!Application::IsEmbedded()) {
+        // _Exit also skips ~InteractiveBackend, the only thing that restores the terminal's original
+        // termios on Linux. Put it back first (tcsetattr only; no-op on Windows / non-tty stdin).
+        Application::Console().RestoreTerminal();
+        // ...and it skips the CRT's atexit stream flush, so anything a plugin left buffered in an
+        // open FILE* is discarded. Server.log is unaffected (TConsole flushes per line), but a Lua
+        // plugin writing its own file would silently lose its tail. One call, flushes every stream.
+        std::fflush(nullptr);
         std::_Exit(0);
     }
 }
