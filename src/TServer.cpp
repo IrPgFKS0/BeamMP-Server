@@ -721,6 +721,43 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
     }
 }
 
+// LAN fork: an 'Oc' edit carries the new configuration only (jbm, vcf, pro, abs, ign), not
+// the spawn's vid/pos/rot. This record is what a late joiner receives as the car's 'Os', and
+// without vid the client cannot register the car (the joiner never saw it). So an edit
+// UPDATES the stored record, as the 'Op' paint handler does: every top-level key the edit
+// carries replaces the stored one (vcf whole, so removed parts do not survive), and the
+// spawn's other keys are kept.
+static nlohmann::json MergeVehicleEdit(nlohmann::json Stored, const nlohmann::json& Edit) {
+    if (!Stored.is_object() || !Edit.is_object()) {
+        return Edit;
+    }
+    Stored.update(Edit);
+    return Stored;
+}
+
+TEST_CASE("MergeVehicleEdit") {
+    const auto Spawn = nlohmann::json::parse(R"({"pid":1,"vid":42,"jbm":"pickup","vcf":{"parts":{"a":"1","b":"2"}},"pos":[1,2,3],"rot":[0,0,0,1],"pro":"1","ign":3})");
+    const auto Edit = nlohmann::json::parse(R"({"pid":1,"jbm":"etk800","vcf":{"parts":{"a":"9"}},"pro":"0","abs":0,"ign":0})");
+    const auto Merged = MergeVehicleEdit(Spawn, Edit);
+    SUBCASE("late joiners can still register and place the car") {
+        CHECK_EQ(Merged.at("vid"), 42);
+        CHECK_EQ(Merged.at("pos"), Spawn.at("pos"));
+        CHECK_EQ(Merged.at("rot"), Spawn.at("rot"));
+    }
+    SUBCASE("the edit's configuration wins") {
+        CHECK_EQ(Merged.at("jbm"), "etk800");
+        CHECK_EQ(Merged.at("vcf"), Edit.at("vcf"));
+        CHECK_FALSE(Merged.at("vcf").at("parts").contains("b"));
+        CHECK_EQ(Merged.at("pro"), "0");
+        CHECK_EQ(Merged.at("abs"), 0);
+        CHECK_EQ(Merged.at("ign"), 0);
+    }
+    SUBCASE("a non-object record or edit is stored as the edit, as before") {
+        CHECK_EQ(MergeVehicleEdit(nlohmann::json(), Edit), Edit);
+        CHECK_EQ(MergeVehicleEdit(Spawn, nlohmann::json::array()), nlohmann::json::array());
+    }
+}
+
 void TServer::Apply(TClient& c, int VID, const std::string& pckt) {
     auto FoundPos = pckt.find('{');
     if (FoundPos == std::string::npos) {
@@ -742,7 +779,7 @@ void TServer::Apply(TClient& c, int VID, const std::string& pckt) {
         return;
     }
 
-    c.SetCarData(VID, Pack);
+    c.SetCarData(VID, MergeVehicleEdit(std::move(VD), Pack));
 }
 
 void TServer::InsertClient(const std::shared_ptr<TClient>& NewClient) {
