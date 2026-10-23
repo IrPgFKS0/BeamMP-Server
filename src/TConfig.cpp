@@ -64,6 +64,8 @@ static constexpr std::string_view StrAdminName = "AdminName";
 static constexpr std::string_view EnvStrAdminName = "BEAMMP_ADMIN_NAME";
 static constexpr std::string_view StrAllowLoopbackAdmin = "AllowLoopbackAdmin";
 static constexpr std::string_view EnvStrAllowLoopbackAdmin = "BEAMMP_ALLOW_LOOPBACK_ADMIN";
+static constexpr std::string_view StrHostAddress = "HostAddress";
+static constexpr std::string_view EnvStrHostAddress = "BEAMMP_HOST_ADDRESS";
 static constexpr std::string_view StrPassword = "Password";
 
 // Misc
@@ -148,6 +150,8 @@ void TConfig::FlushToFile() {
     SetComment(data["General"][StrAdminName.data()].comments(), " Player name allowed to use the in-game /map <name> command. Empty (\"\") = console-only (no in-game map switching).");
     data["General"][StrAllowLoopbackAdmin.data()] = Application::Settings.getAsBool(Settings::Key::General_AllowLoopbackAdmin);
     SetComment(data["General"][StrAllowLoopbackAdmin.data()].comments(), " Treat clients connecting from loopback (the same machine as the server) as admin, so a single-box host can use /map without setting AdminName.");
+    data["General"][StrHostAddress.data()] = Application::Settings.getAsString(Settings::Key::General_HostAddress);
+    SetComment(data["General"][StrHostAddress.data()].comments(), " Combined host only: the LAN address server plugins see for the host's own player, who joins over an in-memory link instead of a socket. Empty (\"\") = automatic: the IP setting below if it names one address, else this machine's address on its route to the internet, else 127.0.0.1. BeamNG.Earth's shared world generation gives it to the other players (TCP 47621).");
     data["General"][StrIP.data()] = Application::Settings.getAsString(Settings::Key::General_IP);
     SetComment(data["General"][StrIP.data()].comments(), " The IP address to bind the server to, this is NOT related to your public IP. Can be used if your machine has multiple network interfaces");
     data["General"][StrPort.data()] = Application::Settings.getAsInt(Settings::Key::General_Port);
@@ -291,6 +295,7 @@ void TConfig::ParseFromFile(std::string_view name) {
         TryReadValue(data, "General", StrAllowGuests, EnvStrAllowGuests, Settings::Key::General_AllowGuests);
         TryReadValue(data, "General", StrAdminName, EnvStrAdminName, Settings::Key::General_AdminName);
         TryReadValue(data, "General", StrAllowLoopbackAdmin, EnvStrAllowLoopbackAdmin, Settings::Key::General_AllowLoopbackAdmin);
+        TryReadValue(data, "General", StrHostAddress, EnvStrHostAddress, Settings::Key::General_HostAddress);
         // Misc
         TryReadValue(data, "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Key::Misc_ImScaredOfUpdates);
         TryReadValue(data, "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Key::Misc_UpdateReminderTime);

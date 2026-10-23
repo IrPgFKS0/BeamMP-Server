@@ -38,6 +38,7 @@ Settings::Settings() {
         { General_InformationPacket, true },
         { General_AdminName, std::string("") },
         { General_AllowLoopbackAdmin, true },
+        { General_HostAddress, std::string("") },
         { Misc_ImScaredOfUpdates, true },
         { Misc_UpdateReminderTime, "30s" }
     };
@@ -60,6 +61,7 @@ Settings::Settings() {
         { { "General", "InformationPacket" }, { General_InformationPacket, READ_WRITE } },
         { { "General", "AdminName" }, { General_AdminName, READ_WRITE } },
         { { "General", "AllowLoopbackAdmin" }, { General_AllowLoopbackAdmin, READ_WRITE } },
+        { { "General", "HostAddress" }, { General_HostAddress, READ_WRITE } },
         { { "Misc", "ImScaredOfUpdates" }, { Misc_ImScaredOfUpdates, READ_WRITE } },
         { { "Misc", "UpdateReminderTime" }, { Misc_UpdateReminderTime, READ_WRITE } }
     };

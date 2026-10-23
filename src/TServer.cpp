@@ -178,6 +178,11 @@ size_t TServer::ClientCount() const {
 // configured General/AdminName, plus (optionally) loopback clients on a single-box host.
 static bool IsMapAdmin(const TClient& c) {
     if (Application::Settings.getAsBool(Settings::Key::General_AllowLoopbackAdmin)) {
+        // LAN p13h46: the combined host's own player (in-memory link) IS the single-box host this rule is for.
+        // Its "ip" identifier is a LAN address now (server plugins need one), so recognise it directly.
+        if (c.IsVirtual()) {
+            return true;
+        }
         const auto& ids = c.GetIdentifiers();
         auto it = ids.find("ip");
         if (it != ids.end()) {

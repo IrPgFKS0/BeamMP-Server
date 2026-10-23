@@ -395,6 +395,97 @@ std::string HashPassword(const std::string& str) {
     return ret.str();
 }
 
+// LAN p13h46: the combined host's own player joins over an in-memory link, so it has no socket address; it used to
+// be registered as "127.0.0.1". Server plugins read a player's "ip" identifier to reach that player's machine --
+// BeamNG.Earth 1.6.0 hands it to the other players for its shared world generation (TCP 47621) -- so the other
+// players were sent to their OWN loopback for the host's tiles. The host's player now carries an address the LAN
+// can reach. Pure choice (doctest below): [General] HostAddress > the bind address when it names one interface >
+// this machine's address on its route to the internet > 127.0.0.1 (the old value).
+static bool IsSpecificAddress(const std::string& Text) {
+    boost::system::error_code ec;
+    const auto Address = boost::asio::ip::make_address(Text, ec);
+    return !ec && !Address.is_unspecified() && !Address.is_loopback() && !Address.is_multicast();
+}
+
+static std::pair<std::string, std::string> ChooseVirtualHostAddress(const std::string& Configured, const std::string& Bind, const std::string& Route) {
+    std::string Note;
+    if (!Configured.empty()) {
+        boost::system::error_code ec;
+        boost::asio::ip::make_address(Configured, ec);
+        if (!ec) {
+            return { Configured, "[General] HostAddress" };
+        }
+        Note = "[General] HostAddress \"" + Configured + "\" is not an IP address, ignored; ";
+    }
+    if (IsSpecificAddress(Bind)) {
+        return { Bind, Note + "the bind address (General.IP)" };
+    }
+    if (IsSpecificAddress(Route)) {
+        return { Route, Note + "automatic: this machine's address on its route to the internet" };
+    }
+    return { "127.0.0.1", Note + "no LAN address found: loopback, other players cannot reach the host through it" };
+}
+
+// The source address the OS picks for its route to TEST-NET-1 (RFC 5737, never a real host). Connecting a UDP
+// socket sends nothing. "" when there is no such route.
+static std::string DetectRouteAddress(boost::asio::io_context& Io) {
+    try {
+        boost::asio::ip::udp::socket Probe(Io);
+        Probe.connect(boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("192.0.2.1"), 9));
+        return Probe.local_endpoint().address().to_string();
+    } catch (const std::exception&) {
+        return "";
+    }
+}
+
+static std::mutex VirtualHostAddressMutex;
+static std::string VirtualHostAddress; // what server plugins see for the host's own player ("" before it exists)
+static bool VirtualHostMismatchWarned = false;
+
+// A remote player reached this server at Local: if that is not the address plugins see for the host's own player,
+// say so ONCE with the exact config line (a wrong automatic choice, e.g. a VPN holding the internet route).
+static void NoteAddressRemotePlayersUse(boost::asio::ip::address Local, const std::string& PlayerIp) {
+    if (Local.is_v6() && Local.to_v6().is_v4_mapped()) {
+        Local = boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped_t::v4_mapped, Local.to_v6());
+    }
+    if (Local.is_loopback()) {
+        return; // a player on this machine says nothing about the LAN
+    }
+    const std::string Seen = Local.to_string();
+    std::scoped_lock Lock(VirtualHostAddressMutex);
+    if (VirtualHostAddress.empty() || VirtualHostMismatchWarned || Seen == VirtualHostAddress) {
+        return;
+    }
+    VirtualHostMismatchWarned = true;
+    beammp_warnf("Combined host: a player from {} reached this server at {}, but server plugins see the host's own player at {}. "
+                 "If other players should reach the host at {} (BeamNG.Earth's shared world generation, TCP 47621), set "
+                 "[General] HostAddress = \"{}\" in ServerConfig.toml.",
+        PlayerIp, Seen, VirtualHostAddress, Seen, Seen);
+}
+
+TEST_CASE("ChooseVirtualHostAddress") {
+    SUBCASE("a configured address wins") {
+        CHECK_EQ(ChooseVirtualHostAddress("192.168.1.50", "::", "10.0.0.2").first, "192.168.1.50");
+    }
+    SUBCASE("then a bind address that names one interface") {
+        CHECK_EQ(ChooseVirtualHostAddress("", "192.168.1.60", "10.0.0.2").first, "192.168.1.60");
+    }
+    SUBCASE("an unspecified or loopback bind address falls through to the route address") {
+        CHECK_EQ(ChooseVirtualHostAddress("", "::", "192.168.1.70").first, "192.168.1.70");
+        CHECK_EQ(ChooseVirtualHostAddress("", "0.0.0.0", "192.168.1.70").first, "192.168.1.70");
+        CHECK_EQ(ChooseVirtualHostAddress("", "127.0.0.1", "192.168.1.70").first, "192.168.1.70");
+    }
+    SUBCASE("nothing usable: loopback, as before p13h46") {
+        CHECK_EQ(ChooseVirtualHostAddress("", "::", "").first, "127.0.0.1");
+        CHECK_EQ(ChooseVirtualHostAddress("", "::", "127.0.0.1").first, "127.0.0.1");
+    }
+    SUBCASE("a configured value that is not an IP address is reported and skipped") {
+        const auto Choice = ChooseVirtualHostAddress("my-pc.local", "::", "192.168.1.70");
+        CHECK_EQ(Choice.first, "192.168.1.70");
+        CHECK(Choice.second.find("not an IP address") != std::string::npos);
+    }
+}
+
 std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     auto Client = CreateClient(std::move(RawConnection.Socket));
     std::string ip = "";
@@ -404,6 +495,11 @@ std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
         ip = RawConnection.SockAddr.address().to_string();
     }
     beammp_tracef("This thread is ip {} ({})", ip, RawConnection.SockAddr.address().to_v6().is_v4_mapped() ? "IPv4 mapped IPv6" : "IPv6");
+    boost::system::error_code LocalEc;
+    const auto LocalEndpoint = Client->GetTCPSock().local_endpoint(LocalEc);
+    if (!LocalEc) {
+        NoteAddressRemotePlayersUse(LocalEndpoint.address(), ip); // LAN p13h46: is the host advertised where players reach it?
+    }
     return AuthenticationImpl(Client, ip);
 }
 
@@ -613,10 +709,19 @@ std::shared_ptr<TClient> TNetwork::AddVirtualClient() {
     auto Client = CreateClient(std::move(Sock));
     Client->SetInMemoryLink(std::make_unique<InMemoryLink>());
     Client->SetIsUDPConnected(true); // no UDP magic handshake -- the in-memory link is always up
-    std::thread([this, Client]() {
+    // LAN p13h46: the address server plugins see for this player (see ChooseVirtualHostAddress).
+    const auto Choice = ChooseVirtualHostAddress(Application::Settings.getAsString(Settings::Key::General_HostAddress),
+        Application::Settings.getAsString(Settings::Key::General_IP), DetectRouteAddress(mServer.IoCtx()));
+    const std::string HostIp = Choice.first;
+    {
+        std::scoped_lock Lock(VirtualHostAddressMutex);
+        VirtualHostAddress = HostIp;
+    }
+    beammp_infof("Combined host: server plugins see the host's own player at {} ({}); [General] HostAddress in ServerConfig.toml overrides it.", HostIp, Choice.second);
+    std::thread([this, Client, HostIp]() {
         RegisterThreadAuto();
         try {
-            AuthenticationImpl(Client, "127.0.0.1");
+            AuthenticationImpl(Client, HostIp);
         } catch (const std::exception& e) {
             beammp_errorf("Virtual (combined-host) client auth/sync failed: {}", e.what());
         }
