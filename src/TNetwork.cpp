@@ -621,6 +621,11 @@ std::shared_ptr<TClient> TNetwork::AuthenticationImpl(std::shared_ptr<TClient> C
     }
 
     beammp_debug("Name -> " + Client->GetName() + ", Guest -> " + std::to_string(Client->IsGuest()) + ", Roles -> " + Client->GetRoles());
+    // LAN p13h48: with no backend the display name IS the identity. Upstream drops the player already connected under
+    // that name as stale. That is right for the same machine (a game that crashed and reconnects before the server
+    // noticed the dead connection), but from ANOTHER machine it let a newcomer with a clashing name kick the player
+    // who was in. The newcomer from another address is now refused instead; the same address still replaces.
+    bool NameTakenElsewhere = false;
     mServer.ForEachClient([&](const std::weak_ptr<TClient>& ClientPtr) -> bool {
         std::shared_ptr<TClient> Cl;
         {
@@ -631,12 +636,23 @@ std::shared_ptr<TClient> TNetwork::AuthenticationImpl(std::shared_ptr<TClient> C
                 return true;
         }
         if (Cl->GetName() == Client->GetName() && Cl->IsGuest() == Client->IsGuest()) {
+            const auto& Ids = Cl->GetIdentifiers();
+            auto It = Ids.find("ip");
+            if (It != Ids.end() && It->second != ClientIp) {
+                NameTakenElsewhere = true;
+                return false;
+            }
             DisconnectClient(Cl, "Stale Client (not a real player)");
             return false;
         }
 
         return true;
     });
+    if (NameTakenElsewhere) {
+        beammp_infof("LAN auth: refused '{}' from {}: that name is already in use by a player from another address", Client->GetName(), ClientIp);
+        ClientKick(*Client, fmt::format("The name '{}' is already in use on this server. Choose another name (Direct Connect, name field) and join again.", Client->GetName()));
+        return nullptr;
+    }
 
     auto Futures = LuaAPI::MP::Engine->TriggerEvent("onPlayerAuth", "", Client->GetName(), Client->GetRoles(), Client->IsGuest(), Client->GetIdentifiers());
     TLuaEngine::WaitForAll(Futures);
