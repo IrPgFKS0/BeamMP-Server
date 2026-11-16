@@ -308,6 +308,13 @@ void TNetwork::TCPServerMain() {
                 beammp_debugf("Failed to set TCP_NODELAY on client socket: {}", ec.message());
                 ec.clear();
             }
+            // LAN p13h121: upstream BeamMP-Server#507 (open): a 4 MB send buffer; with the 4 MB file pieces in
+            // SendFileToClient this took its Windows LAN mod downloads from ~220 to ~4950 Mbit/s.
+            ClientSocket.set_option(boost::asio::socket_base::send_buffer_size(4 * 1024 * 1024), ec);
+            if (ec) {
+                beammp_warnf("Failed to set send buffer size on client socket: {}", ec.message());
+                ec.clear();
+            }
             boost::asio::ip::tcp::endpoint ClientEp = ClientSocket.remote_endpoint(ec);
             if (ec) {
                 beammp_errorf("Accepted socket but failed to query remote endpoint for IP address: {}", ec.message());
@@ -1409,36 +1416,36 @@ void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name
     ::close(fd);
 
 #else
+    // LAN p13h121: upstream BeamMP-Server#507 (open), its SendFileToClient part as written: read the mod in 4 MB
+    // pieces one after the other instead of one buffer of up to 125 MB with a seek per piece, and stop with a
+    // disconnect when the file cannot be opened or read. The send mutex taken above still covers the whole file.
     std::ifstream f(Name.c_str(), std::ios::binary);
-    uint32_t Split = 125 * MB;
-    std::vector<uint8_t> Data;
-    if (Size > Split)
-        Data.resize(Split);
-    else
-        Data.resize(Size);
+    if (!f) {
+        beammp_errorf("Failed to open mod '{}' for sending", Name);
+        DisconnectClient(c, "Failed to open mod during mod download");
+        return;
+    }
+
+    constexpr size_t ChunkSize = 4 * 1024 * 1024;
+    std::vector<uint8_t> Data(ChunkSize);
     boost::asio::ip::tcp::socket* TCPSock = &c.GetTCPSock();
-    std::streamsize Sent = 0;
-    while (!c.IsDisconnected() && Sent < Size) {
-        size_t Diff = Size - Sent;
-        if (Diff > Split) {
-            f.seekg(Sent, std::ios_base::beg);
-            f.read(reinterpret_cast<char*>(Data.data()), Split);
-            if (!TCPSendRaw(c, *TCPSock, Data.data(), Split)) {
-                if (!c.IsDisconnected())
-                    DisconnectClient(c, "TCPSendRaw failed in mod download (1)");
-                break;
-            }
-            Sent += Split;
-        } else {
-            f.seekg(Sent, std::ios_base::beg);
-            f.read(reinterpret_cast<char*>(Data.data()), Diff);
-            if (!TCPSendRaw(c, *TCPSock, Data.data(), int32_t(Diff))) {
-                if (!c.IsDisconnected())
-                    DisconnectClient(c, "TCPSendRaw failed in mod download (2)");
-                break;
-            }
-            Sent += Diff;
+    size_t TotalSent = 0;
+    while (!c.IsDisconnected() && TotalSent < Size) {
+        const size_t Remaining = Size - TotalSent;
+        const size_t ToRead = (Remaining < ChunkSize) ? Remaining : ChunkSize;
+        f.read(reinterpret_cast<char*>(Data.data()), std::streamsize(ToRead));
+        const std::streamsize Got = f.gcount();
+        if (Got <= 0) {
+            beammp_errorf("Failed to read mod '{}' while sending to client {} (sent {} of {} bytes)", Name, c.GetID(), TotalSent, Size);
+            DisconnectClient(c, "read failed during mod download");
+            break;
         }
+        if (!TCPSendRaw(c, *TCPSock, Data.data(), size_t(Got))) {
+            if (!c.IsDisconnected())
+                DisconnectClient(c, "TCPSendRaw failed in mod download");
+            break;
+        }
+        TotalSent += size_t(Got);
     }
 #endif
 }
